@@ -1,12 +1,21 @@
 /**
- * SignCall — Chat App (MongoDB-backed via REST API + Socket.io)
+ * SignCall — Chat App (100% server-backed, zero localStorage data)
  * app.js
  */
-(function () {
+(async function () {
   'use strict';
 
-  const currentUser = API.Auth.requireAuth();
-  if (!currentUser) return;
+  // ── Auth guard — fetch real user from server ─────────────────
+  if (!API.isLoggedIn()) { window.location.href = 'index.html'; return; }
+
+  let currentUser;
+  try {
+    currentUser = await API.Auth.me();   // fresh from MongoDB
+  } catch (err) {
+    UI.Toast.error('Session error: ' + err.message);
+    API.Auth.logout();
+    return;
+  }
 
   // ── Socket.io (real-time notifications) ─────────────────────
   const socket = io(window.location.origin, {
@@ -339,13 +348,15 @@
 
   // ── Profile modal ─────────────────────────────────────────────
   const profileModal = $('profileModal');
-  $('railProfile').addEventListener('click', () => {
-    const u = API.Auth.getCachedUser();
-    $('profileName').value = u?.name || '';
-    $('profileBio').value  = u?.bio  || '';
-    $('profileAvatar').textContent = API.Format.initials(u?.name||'?');
-    $('profileAvatar').style.background = u?.avatarColor || 'var(--color-primary)';
-    UI.Modal.open(profileModal);
+  $('railProfile').addEventListener('click', async () => {
+    try {
+      const u = await API.Auth.me();   // always fetch fresh from server
+      $('profileName').value = u?.name || '';
+      $('profileBio').value  = u?.bio  || '';
+      $('profileAvatar').textContent = API.Format.initials(u?.name||'?');
+      $('profileAvatar').style.background = u?.avatarColor || 'var(--color-primary)';
+      UI.Modal.open(profileModal);
+    } catch (err) { UI.Toast.error('Could not load profile: ' + err.message); }
   });
   $('profileClose').addEventListener('click', () => UI.Modal.close(profileModal));
   $('btnSaveProfile').addEventListener('click', async () => {

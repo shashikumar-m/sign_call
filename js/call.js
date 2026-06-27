@@ -15,9 +15,16 @@
 (async function () {
   'use strict';
 
-  // ── Auth guard ─────────────────────────────────────────────
-  const currentUser = API.Auth.requireAuth();
-  if (!currentUser) return;
+  // ── Auth guard — fetch real user from server ───────────────
+  if (!API.isLoggedIn()) { window.location.href = 'index.html'; return; }
+
+  let currentUser;
+  try {
+    currentUser = await API.Auth.me();
+  } catch {
+    API.Auth.logout();
+    return;
+  }
 
   // ── URL params ─────────────────────────────────────────────
   const params    = new URLSearchParams(location.search);
