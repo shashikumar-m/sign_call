@@ -1,15 +1,7 @@
 'use strict';
 /**
- * sign_call — Main Server
- * ─────────────────────────────────────────────────────────────
- * Express REST API  +  Socket.io signaling  +  MongoDB storage
- *
- * Data flow:
- *   signup/login  → MongoDB users collection (bcrypt hashed passwords)
- *   contacts      → MongoDB contacts collection
- *   messages      → MongoDB messages collection
- *   video call    → WebRTC via Socket.io signaling (P2P, not stored)
- *   online status → Socket.io in-memory (fast)
+ * sign_call — Production Server
+ * Express + Socket.io + MongoDB Atlas
  */
 
 require('dotenv').config();
@@ -28,204 +20,240 @@ const helmet       = require('helmet');
 const app    = express();
 const server = http.createServer(app);
 
-// ── Security middleware ────────────────────────────────────────
-app.use(helmet({ contentSecurityPolicy: false })); // CSP off so inline scripts work
-app.use(cors({ origin: '*' }));
+// ─────────────────────────────────────────────────────────────
+//  MIDDLEWARE  (order matters!)
+// ─────────────────────────────────────────────────────────────
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(cors({ origin: '*', methods: ['GET','POST','PATCH','DELETE','OPTIONS'] }));
 app.use(express.json({ limit: '10kb' }));
 
-// Rate limiting on auth routes
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,  // 15 min
-  max: 20,
-  message: { error: 'Too many attempts, try again later.' },
+// Log every incoming request (helps debug)
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
 });
 
-// ── MongoDB connection ─────────────────────────────────────────
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/sign_call';
+// ─────────────────────────────────────────────────────────────
+//  MONGODB CONNECTION
+// ─────────────────────────────────────────────────────────────
+const MONGODB_URI = process.env.MONGODB_URI;
+if (!MONGODB_URI) {
+  console.error('FATAL: MONGODB_URI not set in .env file');
+  process.exit(1);
+}
 
-mongoose.connect(MONGODB_URI)
-  .then(() => console.log('[mongodb] connected:', MONGODB_URI))
-  .catch(err => {
-    console.error('[mongodb] connection failed:', err.message);
-    console.error('Start MongoDB: sudo systemctl start mongod');
-  });
+mongoose.connect(MONGODB_URI, {
+  serverSelectionTimeoutMS: 10000,
+  socketTimeoutMS: 45000,
+})
+.then(() => {
+  const dbName = mongoose.connection.db.databaseName;
+  console.log(`[mongodb] ✓ Connected to database: ${dbName}`);
+})
+.catch(err => {
+  console.error('[mongodb] ✗ Connection FAILED:', err.message);
+  process.exit(1);
+});
 
-// ══════════════════════════════════════════════════════════════
-//  MONGOOSE SCHEMAS & MODELS
-// ══════════════════════════════════════════════════════════════
+mongoose.connection.on('disconnected', () => console.warn('[mongodb] Disconnected'));
+mongoose.connection.on('reconnected',  () => console.log('[mongodb] Reconnected'));
 
-// ── User Schema ────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+//  SCHEMAS & MODELS
+// ─────────────────────────────────────────────────────────────
+const AVATAR_COLORS = ['#4f8ef7','#a78bfa','#34d399','#f87171','#fbbf24','#fb923c','#38bdf8','#f472b6'];
+
 const userSchema = new mongoose.Schema({
-  name:         { type: String, required: true, trim: true, minlength: 2, maxlength: 60 },
-  email:        { type: String, required: true, unique: true, lowercase: true, trim: true },
-  username:     { type: String, required: true, unique: true, lowercase: true, trim: true, minlength: 3, maxlength: 30 },
-  password:     { type: String, required: true, select: false },   // never returned in queries
-  userType:     { type: String, enum: ['deaf','mute','deafmute','hearing'], default: 'hearing' },
-  avatarColor:  { type: String, default: '#4f8ef7' },
-  bio:          { type: String, default: '', maxlength: 300 },
-  isOnline:     { type: Boolean, default: false },
-  lastSeen:     { type: Date, default: Date.now },
-  createdAt:    { type: Date, default: Date.now },
+  name:        { type: String, required: true, trim: true },
+  email:       { type: String, required: true, unique: true, lowercase: true, trim: true },
+  username:    { type: String, required: true, unique: true, lowercase: true, trim: true },
+  password:    { type: String, required: true, select: false },
+  userType:    { type: String, enum: ['deaf','mute','deafmute','hearing'], default: 'hearing' },
+  avatarColor: { type: String, default: '#4f8ef7' },
+  bio:         { type: String, default: '' },
+  isOnline:    { type: Boolean, default: false },
+  lastSeen:    { type: Date, default: Date.now },
+  createdAt:   { type: Date, default: Date.now },
 }, { versionKey: false });
 
-// Strip password from all JSON output
 userSchema.set('toJSON', {
   transform(doc, ret) { delete ret.password; return ret; }
 });
 
-const User = mongoose.model('User', userSchema);
-
-// ── Contact Schema ─────────────────────────────────────────────
 const contactSchema = new mongoose.Schema({
-  userId:     { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  contactId:  { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  addedAt:    { type: Date, default: Date.now },
+  userId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  contactId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  addedAt:   { type: Date, default: Date.now },
 }, { versionKey: false });
-
-// Unique pair so no duplicate contacts
 contactSchema.index({ userId: 1, contactId: 1 }, { unique: true });
 
-const Contact = mongoose.model('Contact', contactSchema);
-
-// ── Message Schema ─────────────────────────────────────────────
 const messageSchema = new mongoose.Schema({
   conversationId: { type: String, required: true, index: true },
-  from:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  to:     { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  content:{ type: String, required: true, maxlength: 5000 },
-  type:   { type: String, enum: ['text','sign','voice'], default: 'text' },
+  from:      { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  to:        { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  content:   { type: String, required: true },
+  type:      { type: String, enum: ['text','sign','voice'], default: 'text' },
   signLabel: { type: String, default: '' },
-  read:   { type: Boolean, default: false },
+  read:      { type: Boolean, default: false },
   timestamp: { type: Date, default: Date.now },
 }, { versionKey: false });
 
+const User    = mongoose.model('User',    userSchema);
+const Contact = mongoose.model('Contact', contactSchema);
 const Message = mongoose.model('Message', messageSchema);
 
-// ── JWT helpers ────────────────────────────────────────────────
-const JWT_SECRET  = process.env.JWT_SECRET  || 'CHANGE_THIS_SECRET_IN_PRODUCTION';
+// ─────────────────────────────────────────────────────────────
+//  JWT HELPERS
+// ─────────────────────────────────────────────────────────────
+const JWT_SECRET  = process.env.JWT_SECRET  || 'fallback_secret_change_this';
 const JWT_EXPIRES = process.env.JWT_EXPIRES_IN || '7d';
 
-function signToken(userId) {
-  return jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
-}
+const signToken = (userId) =>
+  jwt.sign({ id: userId.toString() }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
 
-function verifyToken(token) {
-  return jwt.verify(token, JWT_SECRET);
-}
+const verifyToken = (token) =>
+  jwt.verify(token, JWT_SECRET);
 
-// ── Auth middleware ────────────────────────────────────────────
-async function requireAuth(req, res, next) {
+// Auth middleware
+const requireAuth = async (req, res, next) => {
   try {
     const header = req.headers.authorization;
-    if (!header?.startsWith('Bearer ')) return res.status(401).json({ error: 'Not authenticated' });
-    const token = header.split(' ')[1];
+    if (!header || !header.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+    const token   = header.split(' ')[1];
     const decoded = verifyToken(token);
-    const user = await User.findById(decoded.id);
-    if (!user) return res.status(401).json({ error: 'User not found' });
+    const user    = await User.findById(decoded.id);
+    if (!user) return res.status(401).json({ error: 'User no longer exists' });
     req.user = user;
     next();
-  } catch {
-    return res.status(401).json({ error: 'Invalid or expired token' });
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token. Please login again.' });
   }
-}
+};
 
-// Avatar colour pool
-const AVATAR_COLORS = ['#4f8ef7','#a78bfa','#34d399','#f87171','#fbbf24','#fb923c','#38bdf8','#f472b6','#818cf8','#6ee7b7'];
+// Rate limiter for auth
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: { error: 'Too many requests, try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
-// ══════════════════════════════════════════════════════════════
-//  REST API ROUTES
-// ══════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────
+//  API ROUTES  — all defined BEFORE static file serving
+// ─────────────────────────────────────────────────────────────
+
+// Health check (test: curl http://localhost:5001/health)
+app.get('/health', (req, res) => {
+  res.json({
+    status:    'ok',
+    mongodb:   mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    dbName:    mongoose.connection.db?.databaseName || 'unknown',
+    uptime:    Math.round(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // ── POST /api/auth/signup ──────────────────────────────────────
 app.post('/api/auth/signup', authLimiter, async (req, res) => {
+  console.log('[signup] body:', JSON.stringify(req.body));
   try {
     const { name, email, password, username, userType } = req.body;
 
+    // Validate required fields
     if (!name || !email || !password || !username) {
-      return res.status(400).json({ error: 'All fields are required' });
+      return res.status(400).json({ error: 'Name, email, username and password are required' });
     }
-    if (password.length < 6) {
+    if (String(password).length < 6) {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
-    if (!/^[a-z0-9_]{3,30}$/i.test(username)) {
-      return res.status(400).json({ error: 'Username: 3-30 chars, letters/numbers/underscores only' });
+    if (!/^[a-zA-Z0-9_]{3,30}$/.test(username)) {
+      return res.status(400).json({ field: 'username', error: 'Username: 3-30 chars, letters/numbers/underscores only' });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ field: 'email', error: 'Invalid email address' });
     }
 
-    // Check uniqueness
-    const [emailExists, usernameExists] = await Promise.all([
-      User.findOne({ email:    email.toLowerCase() }),
-      User.findOne({ username: username.toLowerCase() }),
-    ]);
-    if (emailExists)    return res.status(409).json({ field: 'email',    error: 'Email already registered' });
+    // Check existing email
+    const emailExists = await User.findOne({ email: email.toLowerCase().trim() });
+    if (emailExists) return res.status(409).json({ field: 'email', error: 'Email already registered' });
+
+    // Check existing username
+    const usernameExists = await User.findOne({ username: username.toLowerCase().trim() });
     if (usernameExists) return res.status(409).json({ field: 'username', error: 'Username already taken' });
 
     // Hash password
-    const hashedPassword = await bcrypt.hash(password, 12);
-    const userCount = await User.countDocuments();
-    const color = AVATAR_COLORS[userCount % AVATAR_COLORS.length];
+    const hashed = await bcrypt.hash(String(password), 12);
 
+    // Pick avatar color
+    const count = await User.countDocuments();
+    const color = AVATAR_COLORS[count % AVATAR_COLORS.length];
+
+    // Create user in MongoDB
     const user = await User.create({
-      name: name.trim(),
-      email: email.toLowerCase().trim(),
-      username: username.toLowerCase().trim(),
-      password: hashedPassword,
-      userType: userType || 'hearing',
+      name:        name.trim(),
+      email:       email.toLowerCase().trim(),
+      username:    username.toLowerCase().trim(),
+      password:    hashed,
+      userType:    userType || 'hearing',
       avatarColor: color,
     });
 
-    const token = signToken(user._id);
-    console.log(`[signup] ${user.name} (${user.email})`);
+    console.log(`[signup] ✓ Created user: ${user.name} (${user.email}) id=${user._id}`);
 
-    return res.status(201).json({
-      token,
-      user: {
-        _id: user._id, id: user._id,
-        name: user.name, email: user.email,
-        username: user.username, userType: user.userType,
-        avatarColor: user.avatarColor, bio: user.bio,
-      }
-    });
+    const token = signToken(user._id);
+    return res.status(201).json({ token, user });
+
   } catch (err) {
-    console.error('[signup error]', err.message);
+    console.error('[signup] ERROR:', err.message, err.stack);
+    // Handle MongoDB duplicate key error
+    if (err.code === 11000) {
+      const field = Object.keys(err.keyPattern)[0];
+      return res.status(409).json({ field, error: `${field} already exists` });
+    }
     return res.status(500).json({ error: 'Signup failed: ' + err.message });
   }
 });
 
 // ── POST /api/auth/login ───────────────────────────────────────
 app.post('/api/auth/login', authLimiter, async (req, res) => {
+  console.log('[login] attempt:', req.body?.email);
   try {
     const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password required' });
+    }
 
-    const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
-    if (!user) return res.status(401).json({ field: 'email', error: 'No account found with this email' });
+    const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password');
+    if (!user) {
+      return res.status(401).json({ field: 'email', error: 'No account found with this email' });
+    }
 
-    const match = await bcrypt.compare(password, user.password);
-    if (!match) return res.status(401).json({ field: 'password', error: 'Incorrect password' });
+    const match = await bcrypt.compare(String(password), user.password);
+    if (!match) {
+      return res.status(401).json({ field: 'password', error: 'Incorrect password' });
+    }
 
-    // Mark online
-    await User.findByIdAndUpdate(user._id, { isOnline: true, lastSeen: new Date() });
+    // Update online status
+    user.isOnline = true;
+    user.lastSeen = new Date();
+    await user.save();
 
     const token = signToken(user._id);
-    console.log(`[login] ${user.name}`);
+    console.log(`[login] ✓ ${user.name}`);
+    return res.json({ token, user });
 
-    return res.json({
-      token,
-      user: {
-        _id: user._id, id: user._id,
-        name: user.name, email: user.email,
-        username: user.username, userType: user.userType,
-        avatarColor: user.avatarColor, bio: user.bio,
-      }
-    });
   } catch (err) {
-    return res.status(500).json({ error: 'Login failed' });
+    console.error('[login] ERROR:', err.message);
+    return res.status(500).json({ error: 'Login failed: ' + err.message });
   }
 });
 
 // ── GET /api/auth/me ───────────────────────────────────────────
 app.get('/api/auth/me', requireAuth, (req, res) => {
-  return res.json({ user: req.user });
+  res.json({ user: req.user });
 });
 
 // ── PATCH /api/auth/profile ────────────────────────────────────
@@ -234,30 +262,27 @@ app.patch('/api/auth/profile', requireAuth, async (req, res) => {
     const { name, bio } = req.body;
     const updates = {};
     if (name && name.trim().length >= 2) updates.name = name.trim();
-    if (bio !== undefined) updates.bio = bio.trim().slice(0, 300);
+    if (bio !== undefined) updates.bio = String(bio).slice(0, 300);
     const user = await User.findByIdAndUpdate(req.user._id, updates, { new: true });
     return res.json({ user });
   } catch (err) {
-    return res.status(500).json({ error: 'Update failed' });
+    return res.status(500).json({ error: 'Update failed: ' + err.message });
   }
 });
 
-// ── GET /api/users/search?q=query ─────────────────────────────
-// Search for users by name, username, or email (for adding contacts)
+// ── GET /api/users/search?q= ───────────────────────────────────
 app.get('/api/users/search', requireAuth, async (req, res) => {
   try {
-    const q = (req.query.q || '').trim();
+    const q = String(req.query.q || '').trim();
     if (q.length < 2) return res.json({ users: [] });
-
-    const regex = new RegExp(q, 'i');
+    const regex = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
     const users = await User.find({
-      _id:  { $ne: req.user._id },          // exclude self
-      $or:  [{ name: regex }, { username: regex }, { email: regex }],
+      _id: { $ne: req.user._id },
+      $or: [{ name: regex }, { username: regex }, { email: regex }],
     }).limit(20).select('_id name username email userType avatarColor bio isOnline lastSeen');
-
     return res.json({ users });
   } catch (err) {
-    return res.status(500).json({ error: 'Search failed' });
+    return res.status(500).json({ error: 'Search failed: ' + err.message });
   }
 });
 
@@ -279,10 +304,9 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
     const contacts = await Contact.find({ userId: req.user._id })
       .populate('contactId', '_id name username email userType avatarColor bio isOnline lastSeen')
       .sort({ addedAt: -1 });
-    const users = contacts.map(c => c.contactId).filter(Boolean);
-    return res.json({ contacts: users });
+    return res.json({ contacts: contacts.map(c => c.contactId).filter(Boolean) });
   } catch (err) {
-    return res.status(500).json({ error: 'Could not load contacts' });
+    return res.status(500).json({ error: 'Could not load contacts: ' + err.message });
   }
 });
 
@@ -291,29 +315,25 @@ app.post('/api/contacts', requireAuth, async (req, res) => {
   try {
     const { contactId } = req.body;
     if (!contactId) return res.status(400).json({ error: 'contactId required' });
-    if (contactId === req.user._id.toString()) return res.status(400).json({ error: 'Cannot add yourself' });
-
+    if (String(contactId) === String(req.user._id)) return res.status(400).json({ error: 'Cannot add yourself' });
     const target = await User.findById(contactId);
     if (!target) return res.status(404).json({ error: 'User not found' });
-
-    // Add both directions so both can see each other
     await Promise.all([
       Contact.findOneAndUpdate(
         { userId: req.user._id, contactId },
         { userId: req.user._id, contactId },
-        { upsert: true, new: true }
+        { upsert: true, new: true, setDefaultsOnInsert: true }
       ),
       Contact.findOneAndUpdate(
         { userId: contactId, contactId: req.user._id },
         { userId: contactId, contactId: req.user._id },
-        { upsert: true, new: true }
+        { upsert: true, new: true, setDefaultsOnInsert: true }
       ),
     ]);
-
     console.log(`[contacts] ${req.user.name} ↔ ${target.name}`);
     return res.status(201).json({ message: 'Contact added', contact: target });
   } catch (err) {
-    return res.status(500).json({ error: 'Could not add contact' });
+    return res.status(500).json({ error: 'Could not add contact: ' + err.message });
   }
 });
 
@@ -321,9 +341,9 @@ app.post('/api/contacts', requireAuth, async (req, res) => {
 app.delete('/api/contacts/:contactId', requireAuth, async (req, res) => {
   try {
     await Contact.deleteOne({ userId: req.user._id, contactId: req.params.contactId });
-    return res.json({ message: 'Contact removed' });
-  } catch {
-    return res.status(500).json({ error: 'Could not remove contact' });
+    return res.json({ message: 'Removed' });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -331,25 +351,21 @@ app.delete('/api/contacts/:contactId', requireAuth, async (req, res) => {
 app.get('/api/messages/:contactId', requireAuth, async (req, res) => {
   try {
     const convId = [req.user._id.toString(), req.params.contactId].sort().join(':');
-    const page  = parseInt(req.query.page)  || 1;
-    const limit = parseInt(req.query.limit) || 50;
-    const skip  = (page - 1) * limit;
-
-    const messages = await Message.find({ conversationId: convId })
+    const page   = parseInt(req.query.page)  || 1;
+    const limit  = parseInt(req.query.limit) || 50;
+    const msgs   = await Message.find({ conversationId: convId })
       .sort({ timestamp: -1 })
-      .skip(skip)
+      .skip((page - 1) * limit)
       .limit(limit)
       .lean();
-
-    // Mark unread messages as read
+    // Mark as read
     await Message.updateMany(
       { conversationId: convId, to: req.user._id, read: false },
       { read: true }
     );
-
-    return res.json({ messages: messages.reverse() });
+    return res.json({ messages: msgs.reverse() });
   } catch (err) {
-    return res.status(500).json({ error: 'Could not load messages' });
+    return res.status(500).json({ error: 'Could not load messages: ' + err.message });
   }
 });
 
@@ -358,29 +374,26 @@ app.post('/api/messages', requireAuth, async (req, res) => {
   try {
     const { toId, content, type, signLabel } = req.body;
     if (!toId || !content) return res.status(400).json({ error: 'toId and content required' });
-
     const convId = [req.user._id.toString(), toId].sort().join(':');
     const msg = await Message.create({
       conversationId: convId,
       from:      req.user._id,
       to:        toId,
-      content:   content.trim(),
+      content:   String(content).trim(),
       type:      type || 'text',
       signLabel: signLabel || '',
     });
-
-    // Notify recipient via Socket.io if online
-    const recipientSocketId = onlineUsers.get(toId);
-    if (recipientSocketId) {
-      io.to(recipientSocketId).emit('new_message', {
+    // Notify recipient if online via Socket.io
+    const recipientSocket = onlineUsers.get(toId);
+    if (recipientSocket) {
+      io.to(recipientSocket).emit('new_message', {
         ...msg.toObject(),
         from: { _id: req.user._id, name: req.user.name, avatarColor: req.user.avatarColor },
       });
     }
-
     return res.status(201).json({ message: msg });
   } catch (err) {
-    return res.status(500).json({ error: 'Could not send message' });
+    return res.status(500).json({ error: 'Send failed: ' + err.message });
   }
 });
 
@@ -390,136 +403,114 @@ app.get('/api/messages/unread/count', requireAuth, async (req, res) => {
     const count = await Message.countDocuments({ to: req.user._id, read: false });
     return res.json({ count });
   } catch {
-    return res.status(500).json({ error: 'Could not count unread' });
+    return res.status(500).json({ error: 'Count failed' });
   }
 });
 
-// ── Serve frontend static files ────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+//  STATIC FILES  — AFTER all API routes
+// ─────────────────────────────────────────────────────────────
 const FRONTEND_DIR = path.join(__dirname, '..');
-app.use(express.static(FRONTEND_DIR));
+app.use(express.static(FRONTEND_DIR, {
+  index: false,  // Don't auto-serve index.html (we handle it below)
+  maxAge: '1d',
+}));
 
-// Catch-all — must be AFTER all API routes
-app.get('*', (req, res) => {
-  // Don't catch API routes
-  if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'API route not found' });
+// Serve HTML pages explicitly
+app.get('/',         (req, res) => res.sendFile(path.join(FRONTEND_DIR, 'index.html')));
+app.get('/app',      (req, res) => res.sendFile(path.join(FRONTEND_DIR, 'app.html')));
+app.get('/call',     (req, res) => res.sendFile(path.join(FRONTEND_DIR, 'call.html')));
+app.get('/app.html', (req, res) => res.sendFile(path.join(FRONTEND_DIR, 'app.html')));
+app.get('/call.html',(req, res) => res.sendFile(path.join(FRONTEND_DIR, 'call.html')));
+app.get('/index.html',(req,res) => res.sendFile(path.join(FRONTEND_DIR, 'index.html')));
+
+// 404 for unknown routes
+app.use((req, res) => {
+  if (req.path.startsWith('/api/')) {
+    return res.status(404).json({ error: `API route not found: ${req.method} ${req.path}` });
+  }
   res.sendFile(path.join(FRONTEND_DIR, 'index.html'));
 });
 
-// ══════════════════════════════════════════════════════════════
-//  SOCKET.IO — Signaling + Real-time notifications
-// ══════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────
+//  SOCKET.IO — Real-time signaling
+// ─────────────────────────────────────────────────────────────
 const io = new Server(server, {
   cors: { origin: '*', methods: ['GET','POST'] },
   pingTimeout:  60000,
   pingInterval: 25000,
 });
 
-// Online users: userId(string) → socketId
-const onlineUsers = new Map();
-// Call rooms:   roomId → Set of socketIds
-const rooms       = new Map();
-// Socket meta:  socketId → { userId, userName, roomId }
-const socketMeta  = new Map();
+// Track online users and rooms
+const onlineUsers = new Map(); // userId → socketId
+const rooms       = new Map(); // roomId → Set<socketId>
+const socketMeta  = new Map(); // socketId → { userId, userName, roomId }
 
-// Socket.io JWT auth middleware
+// Authenticate socket connections with JWT
 io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth?.token || socket.handshake.query?.token;
-    if (!token) return next(new Error('Authentication required'));
+    if (!token) return next(new Error('No token'));
     const decoded = verifyToken(token);
     const user = await User.findById(decoded.id);
     if (!user) return next(new Error('User not found'));
     socket.user = user;
     next();
   } catch {
-    next(new Error('Invalid token'));
+    next(new Error('Auth failed'));
   }
 });
 
 io.on('connection', async (socket) => {
   const user = socket.user;
-  console.log(`[+] ${user.name} connected (${socket.id})`);
+  console.log(`[socket+] ${user.name} (${socket.id})`);
 
-  // Mark user online in DB + memory
   onlineUsers.set(user._id.toString(), socket.id);
   await User.findByIdAndUpdate(user._id, { isOnline: true, lastSeen: new Date() });
-
-  // Broadcast online status to all contacts
   broadcastPresence(user._id.toString(), true);
 
-  // ── Call room management ──────────────────────────────────
+  // ── Call room ───────────────────────────────────────────────
   socket.on('join-room', ({ roomId }) => {
     if (!roomId) return;
     const prev = socketMeta.get(socket.id);
     if (prev?.roomId) leaveRoom(socket, prev.roomId);
-
     socket.join(roomId);
     socketMeta.set(socket.id, { userId: user._id.toString(), userName: user.name, roomId });
-
     if (!rooms.has(roomId)) rooms.set(roomId, new Set());
     rooms.get(roomId).add(socket.id);
-
-    const peers = [...rooms.get(roomId)]
-      .filter(id => id !== socket.id)
-      .map(id => {
-        const m = socketMeta.get(id);
-        return { socketId: id, userId: m?.userId, userName: m?.userName };
-      });
-
-    console.log(`[room:${roomId}] ${user.name} joined. Peers: ${peers.length}`);
+    const peers = [...rooms.get(roomId)].filter(id => id !== socket.id).map(id => {
+      const m = socketMeta.get(id);
+      return { socketId: id, userId: m?.userId, userName: m?.userName };
+    });
+    console.log(`[room:${roomId}] ${user.name} joined, peers: ${peers.length}`);
     socket.emit('room-peers', { peers });
     socket.to(roomId).emit('peer-joined', { socketId: socket.id, userId: user._id.toString(), userName: user.name });
   });
 
-  // ── WebRTC signaling ──────────────────────────────────────
-  socket.on('webrtc-offer', ({ targetSocketId, sdp }) => {
-    io.to(targetSocketId).emit('webrtc-offer', { sdp, fromSocketId: socket.id, fromUserId: user._id.toString(), fromUserName: user.name });
-  });
+  // ── WebRTC signaling relay ──────────────────────────────────
+  socket.on('webrtc-offer',  ({ targetSocketId, sdp }) => io.to(targetSocketId).emit('webrtc-offer',  { sdp, fromSocketId: socket.id, fromUserId: user._id.toString(), fromUserName: user.name }));
+  socket.on('webrtc-answer', ({ targetSocketId, sdp }) => io.to(targetSocketId).emit('webrtc-answer', { sdp, fromSocketId: socket.id }));
+  socket.on('webrtc-ice',    ({ targetSocketId, candidate }) => io.to(targetSocketId).emit('webrtc-ice', { candidate, fromSocketId: socket.id }));
 
-  socket.on('webrtc-answer', ({ targetSocketId, sdp }) => {
-    io.to(targetSocketId).emit('webrtc-answer', { sdp, fromSocketId: socket.id });
-  });
-
-  socket.on('webrtc-ice', ({ targetSocketId, candidate }) => {
-    io.to(targetSocketId).emit('webrtc-ice', { candidate, fromSocketId: socket.id });
-  });
-
-  // ── Feature events ────────────────────────────────────────
-  socket.on('sign_caption', (data) => {
-    socket.to(data.roomId).emit('sign_caption', { ...data, fromSocketId: socket.id });
-  });
-
-  socket.on('speech_caption', (data) => {
-    socket.to(data.roomId).emit('speech_caption', { ...data, fromSocketId: socket.id });
-  });
-
-  socket.on('call_control', (data) => {
-    socket.to(data.roomId).emit('call_control', { ...data, fromSocketId: socket.id });
-  });
-
-  socket.on('screen_share', (data) => {
-    socket.to(data.roomId).emit('screen_share', { ...data, fromSocketId: socket.id });
-  });
-
+  // ── Feature events ──────────────────────────────────────────
+  socket.on('sign_caption',  d => socket.to(d.roomId).emit('sign_caption',  { ...d, fromSocketId: socket.id }));
+  socket.on('speech_caption',d => socket.to(d.roomId).emit('speech_caption',{ ...d, fromSocketId: socket.id }));
+  socket.on('call_control',  d => socket.to(d.roomId).emit('call_control',  { ...d, fromSocketId: socket.id }));
+  socket.on('screen_share',  d => socket.to(d.roomId).emit('screen_share',  { ...d, fromSocketId: socket.id }));
   socket.on('call_end', ({ roomId }) => {
     socket.to(roomId).emit('call_ended', { fromSocketId: socket.id });
     leaveRoom(socket, roomId);
   });
-
-  // ── Typing indicator ──────────────────────────────────────
   socket.on('typing', ({ toUserId, isTyping }) => {
-    const recipientSocket = onlineUsers.get(toUserId);
-    if (recipientSocket) {
-      io.to(recipientSocket).emit('typing', { fromUserId: user._id.toString(), fromName: user.name, isTyping });
-    }
+    const r = onlineUsers.get(toUserId);
+    if (r) io.to(r).emit('typing', { fromUserId: user._id.toString(), fromName: user.name, isTyping });
   });
 
-  // ── Disconnect ────────────────────────────────────────────
-  socket.on('disconnect', async (reason) => {
-    console.log(`[-] ${user.name} disconnected (${reason})`);
+  // ── Disconnect ──────────────────────────────────────────────
+  socket.on('disconnect', async () => {
+    console.log(`[socket-] ${user.name}`);
     onlineUsers.delete(user._id.toString());
     await User.findByIdAndUpdate(user._id, { isOnline: false, lastSeen: new Date() });
-
     const meta = socketMeta.get(socket.id);
     if (meta?.roomId) {
       socket.to(meta.roomId).emit('peer-left', { socketId: socket.id, userId: meta.userId, userName: meta.userName });
@@ -529,16 +520,12 @@ io.on('connection', async (socket) => {
     broadcastPresence(user._id.toString(), false);
   });
 
-  // ── Helpers ───────────────────────────────────────────────
   async function broadcastPresence(userId, isOnline) {
-    // Tell all this user's contacts about their online status
     try {
       const contacts = await Contact.find({ userId }).select('contactId');
       contacts.forEach(c => {
-        const cSocketId = onlineUsers.get(c.contactId.toString());
-        if (cSocketId) {
-          io.to(cSocketId).emit('presence', { userId, isOnline, lastSeen: new Date() });
-        }
+        const sid = onlineUsers.get(c.contactId.toString());
+        if (sid) io.to(sid).emit('presence', { userId, isOnline, lastSeen: new Date() });
       });
     } catch {}
   }
@@ -548,28 +535,24 @@ io.on('connection', async (socket) => {
     const room = rooms.get(roomId);
     if (room) { room.delete(sock.id); if (room.size === 0) rooms.delete(roomId); }
     const meta = socketMeta.get(sock.id);
-    if (meta) { socketMeta.set(sock.id, { ...meta, roomId: null }); }
+    if (meta) socketMeta.set(sock.id, { ...meta, roomId: null });
   }
 });
 
-// ── Health check ───────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({
-  status: 'ok',
-  mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-  onlineUsers: onlineUsers.size,
-  activeRooms: rooms.size,
-  uptime: Math.round(process.uptime()),
-}));
-
-// ── Start server ───────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+//  START SERVER
+// ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5001;
+
 server.listen(PORT, '0.0.0.0', () => {
-  const dbName = (process.env.MONGODB_URI || '').split('/').pop()?.split('?')[0] || 'sign_call';
-  console.log(`\n✋ sign_call server running`);
-  console.log(`   URL      : http://0.0.0.0:${PORT}`);
-  console.log(`   Health   : http://0.0.0.0:${PORT}/health`);
-  console.log(`   Database : ${dbName} (MongoDB Atlas)`);
-  console.log(`   Static   : ${FRONTEND_DIR}\n`);
+  console.log('\n✋ sign_call server started');
+  console.log(`   Port    : ${PORT}`);
+  console.log(`   URL     : http://0.0.0.0:${PORT}`);
+  console.log(`   Health  : http://0.0.0.0:${PORT}/health`);
+  console.log(`   Env     : ${process.env.NODE_ENV || 'development'}\n`);
 });
 
-process.on('SIGTERM', () => { server.close(() => process.exit(0)); });
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err.message);
+});
