@@ -12,11 +12,11 @@
  * URL params:
  *   ?cid=<contactId>&mode=video|voice
  */
-(function () {
+(async function () {
   'use strict';
 
   // ── Auth guard ─────────────────────────────────────────────
-  const currentUser = Auth.requireAuth();
+  const currentUser = API.Auth.requireAuth();
   if (!currentUser) return;
 
   // ── URL params ─────────────────────────────────────────────
@@ -25,12 +25,11 @@
   const callMode  = params.get('mode') || 'video';
 
   if (!contactId) { window.location.href = 'app.html'; return; }
-  const contact = DB.Users.publicProfile(DB.Users.get(contactId));
+  const contact = await API.Users.getById(contactId);
   if (!contact)  { window.location.href = 'app.html'; return; }
 
-  // ── Room ID = sorted user IDs joined (same as DB.Messages.convId) ──
-  const roomId = [currentUser.id, contactId].sort().join(':');
-
+  // ── Room ID = sorted user IDs joined (same as Messages convId) ──
+  const roomId = [(currentUser._id||currentUser.id), contactId].sort().join(':');
   // ── STUN/TURN config ───────────────────────────────────────
   // Google's free STUN works for most networks.
   // Add TURN credentials here for users behind strict firewalls.
@@ -159,6 +158,7 @@
     const serverUrl = window.SIGNALING_SERVER || location.origin;
 
     state.socket = io(serverUrl, {
+      auth: { token: API.getToken() },
       transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionAttempts: 10,
@@ -569,7 +569,7 @@
         addCaptionEntry('speech', text, 'You');
         emitSpeechCaption(text, true);
         // Save to chat
-        DB.Messages.send(currentUser.id, contactId, text, 'text');
+        API.Messages.send(contactId, text, 'text').catch(()=>{});
         setTimeout(() => {
           if (captionFinal.textContent === text) captionFinal.textContent = '';
           if (!captionInterim.textContent) captionBar.classList.add('hidden');
@@ -730,7 +730,6 @@
     if (state.localStream)   { state.localStream.getTracks().forEach(t => t.stop()); }
     if (state.screenStream)  { state.screenStream.getTracks().forEach(t => t.stop()); }
     if (state.socket)        { state.socket.disconnect(); }
-    DB.Presence.set(currentUser.id, 'online');
     window.location.href = 'app.html';
   }
 
@@ -841,7 +840,6 @@
     if (state.localStream)  state.localStream.getTracks().forEach(t => t.stop());
     if (state.screenStream) state.screenStream.getTracks().forEach(t => t.stop());
     if (state.socket?.connected) state.socket.emit('call_end', { roomId });
-    DB.Presence.set(currentUser.id, 'online');
   });
 
   // ── Set active defaults & boot ────────────────────────────

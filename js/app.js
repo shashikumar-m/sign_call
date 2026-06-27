@@ -1,462 +1,361 @@
 /**
- * SignConnect — Chat Application Logic
+ * SignCall — Chat App (MongoDB-backed via REST API + Socket.io)
  * app.js
  */
 (function () {
   'use strict';
 
-  // ── Require auth ──────────────────────────────────────────
-  const currentUser = Auth.requireAuth();
+  const currentUser = API.Auth.requireAuth();
   if (!currentUser) return;
-  DB.Presence.set(currentUser.id, 'online');
 
-  // ── State ─────────────────────────────────────────────────
+  // ── Socket.io (real-time notifications) ─────────────────────
+  const socket = io(window.location.origin, {
+    auth: { token: API.getToken() },
+    transports: ['websocket','polling'],
+  });
+
+  socket.on('connect', () => console.log('[socket] connected'));
+  socket.on('connect_error', (e) => console.warn('[socket] error:', e.message));
+
+  // Real-time new message notification
+  socket.on('new_message', (msg) => {
+    const cid = msg.from?._id || msg.from;
+    if (state.activeContactId === cid) {
+      appendMsgEl(msg);
+      UI.scrollToBottom(messagesArea);
+    } else {
+      UI.Toast.info(`💬 ${msg.from?.name || 'Someone'}: ${API.Format.msgPreview(msg)}`);
+    }
+    refreshContactList();
+  });
+
+  // Typing indicator
+  socket.on('typing', ({ fromUserId, fromName, isTyping }) => {
+    if (fromUserId === state.activeContactId) {
+      const typingEl = document.getElementById('typingIndicator');
+      if (typingEl) typingEl.textContent = isTyping ? `${fromName} is typing…` : '';
+    }
+  });
+
+  // Online presence updates
+  socket.on('presence', ({ userId, isOnline, lastSeen }) => {
+    // Update contact item in list
+    const item = contactsList.querySelector(`[data-id="${userId}"]`);
+    if (item) {
+      const dot = item.querySelector('.contact-status');
+      if (dot) {
+        dot.className = `contact-status status-dot ${isOnline ? 'status-online' : 'status-offline'}`;
+      }
+    }
+    // Update chat header if this is the active contact
+    if (userId === state.activeContactId) {
+      const sub = document.getElementById('chatHeaderSub');
+      if (sub) sub.textContent = isOnline ? '● Online' : `Last seen ${API.Format.relativeTime(lastSeen)}`;
+    }
+  });
+
+  // ── State ────────────────────────────────────────────────────
   const state = {
-    activeContact:  null,
-    activePanel:    'chats',  // 'chats' | 'contacts' | 'settings'
-    signPanelOpen:  false,
-    signStream:     null,
-    handsInstance:  null,
-    cameraUtil:     null,
-    signWords:      [],
-    signRunning:    false,
+    activeContactId: null,
+    contacts: [],
+    signPanelOpen: false,
+    signStream: null,
+    handsInstance: null,
+    cameraUtil: null,
+    signWords: [],
+    signRunning: false,
+    typingTimer: null,
   };
 
-  // ── DOM refs ──────────────────────────────────────────────
+  // ── DOM refs ─────────────────────────────────────────────────
   const $ = id => document.getElementById(id);
-  const contactsList    = $('contactsList');
-  const messagesArea    = $('messagesArea');
-  const chatHeader      = $('chatHeader');
-  const inputBar        = $('inputBar');
-  const welcomeScreen   = $('welcomeScreen');
-  const msgInput        = $('msgInput');
-  const signPanel       = $('signPanel');
-  const signWordQueue   = $('signWordQueue');
-  const signGestureLabel= $('signGestureLabel');
-  const signConfFill    = $('signConfFill');
-  const signConfPct     = $('signConfPct');
-  const signVideo       = $('signVideo');
-  const signCanvas      = $('signCanvas');
-  const btnSend         = $('btnSend');
-  const btnSendSign     = $('btnSendSign');
-  const emojiPicker     = $('emojiPicker');
-  const emojiGrid       = $('emojiGrid');
-  const emojiTabs       = $('emojiTabs');
+  const contactsList  = $('contactsList');
+  const messagesArea  = $('messagesArea');
+  const chatHeader    = $('chatHeader');
+  const inputBar      = $('inputBar');
+  const welcomeScreen = $('welcomeScreen');
+  const msgInput      = $('msgInput');
+  const signPanel     = $('signPanel');
+  const signWordQueue = $('signWordQueue');
+  const signGestureLabel = $('signGestureLabel');
+  const signConfFill  = $('signConfFill');
+  const signConfPct   = $('signConfPct');
+  const signVideo     = $('signVideo');
+  const signCanvas    = $('signCanvas');
+  const btnSend       = $('btnSend');
+  const btnSendSign   = $('btnSendSign');
+  const emojiPicker   = $('emojiPicker');
 
-  // ── Init UI ───────────────────────────────────────────────
+  // ── Init user avatar in rail ─────────────────────────────────
   const navAvatar = $('navAvatar');
-  navAvatar.textContent = UI.Format.initials(currentUser.name);
-  navAvatar.style.background = currentUser.avatarColor || 'var(--color-primary)';
+  if (navAvatar) {
+    navAvatar.textContent = API.Format.initials(currentUser.name);
+    navAvatar.style.background = currentUser.avatarColor || 'var(--color-primary)';
+  }
 
-  renderContactList();
+  // ── Load contacts on boot ─────────────────────────────────────
+  loadContacts();
 
-  // ── Rail navigation ────────────────────────────────────────
-  document.querySelectorAll('.rail-btn[data-rail]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.rail-btn[data-rail]').forEach(b => {
-        b.classList.remove('active');
-        b.removeAttribute('aria-current');
-      });
-      btn.classList.add('active');
-      btn.setAttribute('aria-current', 'page');
-      state.activePanel = btn.dataset.rail;
-      $('sidebarPanelTitle').textContent =
-        state.activePanel === 'chats' ? 'Chats' :
-        state.activePanel === 'contacts' ? 'Contacts' : 'Settings';
+  async function loadContacts() {
+    contactsList.innerHTML = UI.Skeleton.contacts(4);
+    try {
+      state.contacts = await API.Contacts.getAll();
       renderContactList();
-    });
-  });
+    } catch (err) {
+      UI.Toast.error('Could not load contacts: ' + err.message);
+      contactsList.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><p class="empty-desc">Could not load contacts</p></div>`;
+    }
+  }
 
-  $('railLogout').addEventListener('click', () => {
-    if (confirm('Sign out of SignConnect?')) Auth.logout();
-  });
-
-  // ── Sidebar tabs ────────────────────────────────────────────
-  document.querySelectorAll('.sidebar-tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      document.querySelectorAll('.sidebar-tab').forEach(t => {
-        t.classList.remove('active');
-        t.setAttribute('aria-selected', 'false');
-      });
-      tab.classList.add('active');
-      tab.setAttribute('aria-selected', 'true');
-      state.activePanel = tab.dataset.panel;
-      $('sidebarPanelTitle').textContent = state.activePanel === 'chats' ? 'Chats' : 'Contacts';
-      renderContactList();
-    });
-  });
-
-  // ── Contact search ──────────────────────────────────────────
-  const contactSearch = $('contactSearch');
-  contactSearch.addEventListener('input', UI.debounce(() => renderContactList(contactSearch.value), 200));
-
-  // ── Render contact list ─────────────────────────────────────
   function renderContactList(filter = '') {
-    const contacts = DB.Contacts.getForUser(currentUser.id);
     const q = filter.toLowerCase();
-    const filtered = contacts.filter(c =>
-      !q || c.name.toLowerCase().includes(q) || (c.email && c.email.toLowerCase().includes(q))
+    const filtered = state.contacts.filter(c =>
+      !q || c.name.toLowerCase().includes(q) || (c.username && c.username.toLowerCase().includes(q))
     );
 
-    if (filtered.length === 0) {
-      contactsList.innerHTML = `
-        <div class="empty-state">
-          <div class="empty-icon" aria-hidden="true">${filter ? '🔍' : '💬'}</div>
-          <div class="empty-title">${filter ? 'No results' : 'No contacts yet'}</div>
-          <p class="empty-desc">${filter ? 'Try a different search.' : 'Add contacts to start chatting.'}</p>
-        </div>`;
+    if (!filtered.length) {
+      contactsList.innerHTML = `<div class="empty-state">
+        <div class="empty-icon">${filter ? '🔍' : '💬'}</div>
+        <div class="empty-title">${filter ? 'No results' : 'No contacts yet'}</div>
+        <p class="empty-desc">${filter ? 'Try a different search.' : 'Click + to add a contact.'}</p>
+      </div>`;
       return;
     }
 
-    let html = '';
-    filtered.forEach(contact => {
-      const last    = DB.Messages.lastMessage(currentUser.id, contact.id);
-      const unread  = DB.Messages.unreadCount(currentUser.id, contact.id);
-      const presence= DB.Presence.get(contact.id);
-      const statusCls = presence.status === 'online' ? 'status-online' : 'status-offline';
-      const isActive  = state.activeContact?.id === contact.id;
-
-      html += `<div class="contact-item${isActive?' active':''}" role="listitem"
-          data-id="${contact.id}" tabindex="0" aria-label="Chat with ${contact.name}">
+    contactsList.innerHTML = filtered.map(c => {
+      const isActive = state.activeContactId === (c._id || c.id);
+      const statusCls = c.isOnline ? 'status-online' : 'status-offline';
+      return `<div class="contact-item${isActive?' active':''}" data-id="${c._id||c.id}" role="listitem" tabindex="0">
         <div class="contact-avatar-wrap">
-          <div class="avatar avatar-md" style="background:${contact.avatarColor||'var(--color-primary)'}">
-            ${UI.Format.initials(contact.name)}
+          <div class="avatar avatar-md" style="background:${c.avatarColor||'var(--color-primary)'}">
+            ${API.Format.initials(c.name)}
           </div>
-          <span class="contact-status status-dot ${statusCls}" aria-label="${presence.status}"></span>
+          <span class="contact-status status-dot ${statusCls}" aria-label="${c.isOnline?'Online':'Offline'}"></span>
         </div>
         <div class="contact-info">
-          <div class="contact-name">${escHtml(contact.name)}</div>
-          <div class="contact-last-msg">${last ? escHtml(UI.Format.msgPreview(last)) : '<em>Start a conversation</em>'}</div>
-        </div>
-        <div class="contact-meta">
-          <span class="contact-time">${last ? UI.Format.relativeTime(last.timestamp) : ''}</span>
-          ${unread > 0 ? `<span class="badge badge-primary" aria-label="${unread} unread">${unread}</span>` : ''}
+          <div class="contact-name">${escHtml(c.name)}</div>
+          <div class="contact-last-msg text-faint">${c.isOnline ? '● Online' : API.Format.relativeTime(c.lastSeen)}</div>
         </div>
       </div>`;
-    });
-
-    contactsList.innerHTML = html;
+    }).join('');
 
     contactsList.querySelectorAll('.contact-item').forEach(item => {
-      const openChat = () => {
+      const open = () => {
         const cid = item.dataset.id;
-        const contact = contacts.find(c => c.id === cid);
+        const contact = state.contacts.find(c => (c._id||c.id) === cid);
         if (contact) openChatWith(contact);
       };
-      item.addEventListener('click', openChat);
-      item.addEventListener('keydown', e => { if (e.key==='Enter'||e.key===' ') openChat(); });
+      item.addEventListener('click', open);
+      item.addEventListener('keydown', e => { if (e.key==='Enter'||e.key===' ') open(); });
     });
   }
 
-  // ── Open chat ────────────────────────────────────────────────
-  function openChatWith(contact) {
-    state.activeContact = contact;
-    DB.Messages.markRead(currentUser.id, contact.id, currentUser.id);
+  async function refreshContactList() {
+    try {
+      state.contacts = await API.Contacts.getAll();
+      renderContactList($('contactSearch').value || '');
+    } catch {}
+  }
 
-    // Show/hide panels
+  // ── Open chat ─────────────────────────────────────────────────
+  async function openChatWith(contact) {
+    const cid = contact._id || contact.id;
+    state.activeContactId = cid;
+
     welcomeScreen.classList.add('hidden');
     chatHeader.classList.remove('hidden');
     messagesArea.classList.remove('hidden');
     inputBar.classList.remove('hidden');
 
-    // Update header
-    const presence = DB.Presence.get(contact.id);
-    $('chatHeaderAvatar').textContent = UI.Format.initials(contact.name);
+    $('chatHeaderAvatar').textContent = API.Format.initials(contact.name);
     $('chatHeaderAvatar').style.background = contact.avatarColor || 'var(--color-primary)';
     $('chatHeaderName').textContent = contact.name;
-    $('chatHeaderSub').textContent  = presence.status === 'online' ? '● Online' : `Last seen ${UI.Format.relativeTime(presence.lastSeen)}`;
-    $('chatHeaderStatus').className = `contact-status status-dot ${presence.status==='online'?'status-online':'status-offline'}`;
+    $('chatHeaderSub').textContent  = contact.isOnline ? '● Online' : `Last seen ${API.Format.relativeTime(contact.lastSeen)}`;
 
-    // Video/voice call buttons open call.html
-    $('btnVideoCall').onclick = () => openCall(contact, 'video');
-    $('btnVoiceCall').onclick = () => openCall(contact, 'voice');
+    $('btnVideoCall').onclick = () => window.location.href = `call.html?cid=${cid}&mode=video`;
+    $('btnVoiceCall').onclick = () => window.location.href = `call.html?cid=${cid}&mode=voice`;
 
-    renderMessages();
-    renderContactList(contactSearch.value);
+    renderContactList($('contactSearch').value || '');
+
+    // Load messages from server
+    messagesArea.innerHTML = `<div style="text-align:center;padding:20px;color:var(--color-text-3)">Loading…</div>`;
+    try {
+      const msgs = await API.Messages.getConversation(cid);
+      renderMessages(msgs);
+    } catch (err) {
+      messagesArea.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><p>${escHtml(err.message)}</p></div>`;
+    }
     msgInput.focus();
   }
 
-  function openCall(contact, mode) {
-    const params = new URLSearchParams({ cid: contact.id, mode });
-    window.location.href = `call.html?${params.toString()}`;
-  }
-
-  // ── Render messages ──────────────────────────────────────────
-  function renderMessages() {
-    if (!state.activeContact) return;
-    const msgs = DB.Messages.getConversation(currentUser.id, state.activeContact.id);
+  function renderMessages(msgs) {
     messagesArea.innerHTML = '';
-
-    if (msgs.length === 0) {
-      messagesArea.innerHTML = `
-        <div class="empty-state">
-          <div class="empty-icon" aria-hidden="true">💬</div>
-          <div class="empty-title">Start the conversation</div>
-          <p class="empty-desc">Say hello or sign a greeting to ${escHtml(state.activeContact.name)}!</p>
-        </div>`;
+    if (!msgs.length) {
+      messagesArea.innerHTML = `<div class="empty-state"><div class="empty-icon">💬</div>
+        <div class="empty-title">Start the conversation</div>
+        <p class="empty-desc">Say hello or sign a greeting!</p></div>`;
       return;
     }
-
     let lastDate = null;
-    msgs.forEach((msg, idx) => {
-      // Date divider
-      const msgDate = UI.Format.date(msg.timestamp);
-      if (msgDate !== lastDate) {
-        lastDate = msgDate;
+    msgs.forEach(msg => {
+      const d = new Date(msg.timestamp).toDateString();
+      if (d !== lastDate) {
+        lastDate = d;
         const div = document.createElement('div');
         div.className = 'date-divider';
-        div.innerHTML = `<span class="date-label">${msgDate}</span>`;
+        div.innerHTML = `<span class="date-label">${d === new Date().toDateString() ? 'Today' : d}</span>`;
         messagesArea.appendChild(div);
       }
-      appendMsgEl(msg, false);
+      appendMsgEl(msg);
     });
-
     UI.scrollToBottom(messagesArea, false);
+    // Typing indicator placeholder
+    const typing = document.createElement('div');
+    typing.id = 'typingIndicator';
+    typing.style.cssText = 'font-size:0.78rem;color:var(--color-text-3);padding:4px 20px;min-height:20px';
+    messagesArea.appendChild(typing);
   }
 
-  function appendMsgEl(msg, scroll = true) {
-    const isMe = msg.from === currentUser.id;
-    const isSameAsPrev = () => {
-      const children = messagesArea.querySelectorAll('.msg-row');
-      if (!children.length) return false;
-      const last = children[children.length-1];
-      return last.dataset.from === msg.from;
-    };
+  function appendMsgEl(msg) {
+    const uid = currentUser._id || currentUser.id;
+    const isMe = (msg.from?._id || msg.from) === uid || (msg.from?._id || msg.from)?.toString() === uid?.toString();
+    const contact = state.contacts.find(c => (c._id||c.id) === state.activeContactId);
 
     const row = document.createElement('div');
     row.className = `msg-row ${isMe ? 'sent' : 'recv'}`;
-    row.dataset.msgId = msg.id;
-    row.dataset.from  = msg.from;
 
-    let bubbleHtml = '';
+    let bubble = '';
     if (msg.type === 'sign') {
-      bubbleHtml = `<div class="msg-bubble msg-sign ${isMe?'sent':''}">
-        <div class="sign-label"><span aria-hidden="true">✋</span>${escHtml(msg.signLabel||'ASL Sign')}</div>
+      bubble = `<div class="msg-bubble msg-sign${isMe?' sent':''}">
+        <div class="sign-label">✋ ${escHtml(msg.signLabel||'ASL Sign')}</div>
         ${escHtml(msg.content)}
       </div>`;
     } else {
-      bubbleHtml = `<div class="msg-bubble">${escHtml(msg.content)}</div>`;
+      bubble = `<div class="msg-bubble">${escHtml(msg.content)}</div>`;
     }
 
-    const avatar = !isMe && !isSameAsPrev()
-      ? `<div class="avatar avatar-sm" style="background:${state.activeContact?.avatarColor||'var(--color-primary)'}">${UI.Format.initials(state.activeContact?.name||'?')}</div>`
-      : (isMe ? '' : '<div style="width:32px;flex-shrink:0"></div>');
+    const avatarHtml = !isMe
+      ? `<div class="avatar avatar-sm" style="background:${contact?.avatarColor||'var(--color-primary)'}">${API.Format.initials(contact?.name||'?')}</div>`
+      : '';
 
-    row.innerHTML = `
-      ${!isMe ? avatar : ''}
-      <div>
-        ${bubbleHtml}
-        <span class="msg-time">${UI.Format.time(msg.timestamp)}${isMe?' ✓✓':''}</span>
-      </div>
-      ${isMe ? '' : ''}
-    `;
-
+    row.innerHTML = `${avatarHtml}<div>${bubble}
+      <span class="msg-time">${API.Format.time(msg.timestamp)}${isMe?' ✓✓':''}</span>
+    </div>`;
     messagesArea.appendChild(row);
-    if (scroll) UI.scrollToBottom(messagesArea);
   }
 
-  // ── Send text message ────────────────────────────────────────
-  function sendTextMessage() {
+  // ── Send message ──────────────────────────────────────────────
+  async function sendTextMessage() {
     const text = msgInput.value.trim();
-    if (!text || !state.activeContact) return;
-
-    const msg = DB.Messages.send(currentUser.id, state.activeContact.id, text, 'text');
-    appendMsgEl(msg);
+    if (!text || !state.activeContactId) return;
+    btnSend.disabled = true;
     msgInput.value = '';
     msgInput.style.height = 'auto';
-    btnSend.disabled = true;
-    renderContactList(contactSearch.value);
 
-    // Simulate reply from contact (for demo/testing purposes)
-    simulateReply();
-  }
-
-  function simulateReply() {
-    if (!state.activeContact) return;
-    const contact = state.activeContact;
-    const delay = 1200 + Math.random() * 1200;
-
-    setTimeout(() => {
-      if (!state.activeContact || state.activeContact.id !== contact.id) return;
-      const isSign = contact.userType === 'mute' || contact.userType === 'deafmute';
-      const replies = ['Got it! 👍', 'That makes sense.', 'Thanks for sharing!', 'Sounds good!', 'I understand.', 'OK, see you then!'];
-      const signReplies = ['Hello', 'Thank You', 'I Love You', 'Good', 'Yes', 'Peace'];
-      const content = isSign
-        ? signReplies[Math.floor(Math.random() * signReplies.length)]
-        : replies[Math.floor(Math.random() * replies.length)];
-
-      const msg = DB.Messages.send(contact.id, currentUser.id, content, isSign ? 'sign' : 'text');
-      if (isSign) msg.signLabel = 'ASL: ' + content;
+    try {
+      const msg = await API.Messages.send(state.activeContactId, text);
       appendMsgEl(msg);
-      renderContactList(contactSearch.value);
-    }, delay);
+      UI.scrollToBottom(messagesArea);
+    } catch (err) {
+      UI.Toast.error('Send failed: ' + err.message);
+      msgInput.value = text; // restore
+    }
+    btnSend.disabled = false;
   }
 
-  // ── Input handlers ───────────────────────────────────────────
   msgInput.addEventListener('input', function () {
-    // Auto-resize
     this.style.height = 'auto';
     this.style.height = Math.min(this.scrollHeight, 140) + 'px';
     btnSend.disabled = !this.value.trim();
+    // Typing indicator
+    if (state.activeContactId) {
+      socket.emit('typing', { toUserId: state.activeContactId, isTyping: true });
+      clearTimeout(state.typingTimer);
+      state.typingTimer = setTimeout(() => {
+        socket.emit('typing', { toUserId: state.activeContactId, isTyping: false });
+      }, 1500);
+    }
   });
-
-  msgInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTextMessage(); }
-  });
-
+  msgInput.addEventListener('keydown', e => { if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); sendTextMessage(); } });
   btnSend.addEventListener('click', sendTextMessage);
 
-  $('btnAttach').addEventListener('click', () => {
-    UI.Toast.info('File sharing — coming in the next release 📎');
-  });
+  // ── Contact search ────────────────────────────────────────────
+  $('contactSearch').addEventListener('input', UI.debounce(function() {
+    renderContactList(this.value);
+  }, 200));
 
-  // ── Add contact modal ────────────────────────────────────────
+  // ── Navigation tabs ───────────────────────────────────────────
+  document.querySelectorAll('.sidebar-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.sidebar-tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected','false'); });
+      tab.classList.add('active'); tab.setAttribute('aria-selected','true');
+    });
+  });
+  $('railLogout').addEventListener('click', () => { if (confirm('Sign out?')) API.Auth.logout(); });
+
+  // ── Add contact modal ─────────────────────────────────────────
   const addContactModal = $('addContactModal');
-  $('btnAddContact')  .addEventListener('click', () => UI.Modal.open(addContactModal));
-  $('welcomeAddBtn')  .addEventListener('click', () => UI.Modal.open(addContactModal));
+  $('btnAddContact').addEventListener('click', () => UI.Modal.open(addContactModal));
+  $('welcomeAddBtn').addEventListener('click', () => UI.Modal.open(addContactModal));
   $('addContactClose').addEventListener('click', () => UI.Modal.close(addContactModal));
 
-  const addContactSearch  = $('addContactSearch');
-  const addContactResults = $('addContactResults');
-
-  addContactSearch.addEventListener('input', UI.debounce(() => {
-    const q = addContactSearch.value.trim();
-    if (!q) {
-      addContactResults.innerHTML = `<div class="empty-state"><div class="empty-icon">🔍</div><p class="empty-desc">Start typing to search</p></div>`;
-      return;
-    }
-    const users = DB.Users.search(q).filter(u => u.id !== currentUser.id);
-    if (!users.length) {
-      addContactResults.innerHTML = `<div class="empty-state"><div class="empty-icon">😕</div><p class="empty-desc">No users found for "${escHtml(q)}"</p></div>`;
-      return;
-    }
-    addContactResults.innerHTML = users.map(u => `
-      <div class="search-result-item" data-uid="${u.id}" role="listitem" tabindex="0">
-        <div class="avatar avatar-md" style="background:${u.avatarColor||'var(--color-primary)'}">${UI.Format.initials(u.name)}</div>
-        <div>
-          <div style="font-size:0.9rem;font-weight:600">${escHtml(u.name)}</div>
-          <div style="font-size:0.78rem;color:var(--color-text-3)">${escHtml(u.email)}</div>
-        </div>
-        ${DB.Contacts.isContact(currentUser.id, u.id)
-          ? '<span style="font-size:0.78rem;color:var(--color-accent)">✓ Added</span>'
-          : '<button class="btn btn-primary btn-sm">Add</button>'}
-      </div>`).join('');
-
-    addContactResults.querySelectorAll('.search-result-item').forEach(item => {
-      const addBtn = item.querySelector('button');
-      if (!addBtn) return;
-      addBtn.addEventListener('click', () => {
-        const uid = item.dataset.uid;
-        DB.Contacts.add(currentUser.id, uid);
-        UI.Toast.success('Contact added!');
-        addBtn.textContent = '✓ Added';
-        addBtn.disabled = true;
-        renderContactList();
+  $('addContactSearch').addEventListener('input', UI.debounce(async function() {
+    const q = this.value.trim();
+    const results = $('addContactResults');
+    if (q.length < 2) { results.innerHTML = `<div class="empty-state"><div class="empty-icon">🔍</div><p class="empty-desc">Type at least 2 characters</p></div>`; return; }
+    results.innerHTML = `<div style="padding:12px;text-align:center;color:var(--color-text-3)">Searching…</div>`;
+    try {
+      const users = await API.Users.search(q);
+      if (!users.length) { results.innerHTML = `<div class="empty-state"><div class="empty-icon">😕</div><p class="empty-desc">No users found</p></div>`; return; }
+      const isContact = (id) => state.contacts.some(c => (c._id||c.id) === id);
+      results.innerHTML = users.map(u => `
+        <div class="search-result-item" data-uid="${u._id||u.id}">
+          <div class="avatar avatar-md" style="background:${u.avatarColor||'var(--color-primary)'}">${API.Format.initials(u.name)}</div>
+          <div style="flex:1">
+            <div style="font-weight:600;font-size:0.9rem">${escHtml(u.name)}</div>
+            <div style="font-size:0.78rem;color:var(--color-text-3)">@${escHtml(u.username)} · ${escHtml(u.userType)}</div>
+          </div>
+          ${isContact(u._id||u.id)
+            ? '<span style="font-size:0.78rem;color:var(--color-accent)">✓ Added</span>'
+            : `<button class="btn btn-primary btn-sm" data-add="${u._id||u.id}">Add</button>`}
+        </div>`).join('');
+      results.querySelectorAll('[data-add]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const uid = btn.dataset.add;
+          btn.disabled = true; btn.textContent = 'Adding…';
+          try {
+            await API.Contacts.add(uid);
+            btn.textContent = '✓ Added';
+            UI.Toast.success('Contact added!');
+            await loadContacts();
+          } catch (err) {
+            btn.disabled = false; btn.textContent = 'Add';
+            UI.Toast.error(err.message);
+          }
+        });
       });
-    });
-  }, 250));
+    } catch (err) { results.innerHTML = `<div class="empty-state"><p>${escHtml(err.message)}</p></div>`; }
+  }, 350));
 
-  // ── Profile modal ────────────────────────────────────────────
+  // ── Profile modal ─────────────────────────────────────────────
   const profileModal = $('profileModal');
   $('railProfile').addEventListener('click', () => {
-    const fresh = Auth.refreshSession();
-    $('profileName').value = fresh?.name || '';
-    $('profileBio').value  = fresh?.bio  || '';
-    $('profileAvatar').textContent = UI.Format.initials(fresh?.name || '?');
-    $('profileAvatar').style.background = fresh?.avatarColor || 'var(--color-primary)';
+    const u = API.Auth.getCachedUser();
+    $('profileName').value = u?.name || '';
+    $('profileBio').value  = u?.bio  || '';
+    $('profileAvatar').textContent = API.Format.initials(u?.name||'?');
+    $('profileAvatar').style.background = u?.avatarColor || 'var(--color-primary)';
     UI.Modal.open(profileModal);
   });
   $('profileClose').addEventListener('click', () => UI.Modal.close(profileModal));
-
-  $('btnSaveProfile').addEventListener('click', () => {
-    const name = $('profileName').value.trim();
-    const bio  = $('profileBio').value.trim();
-    if (!name) { UI.Toast.error('Name cannot be empty'); return; }
-    Auth.updateProfile({ name, bio });
-    navAvatar.textContent = UI.Format.initials(name);
-    UI.Toast.success('Profile updated ✓');
-    UI.Modal.close(profileModal);
-    renderContactList();
+  $('btnSaveProfile').addEventListener('click', async () => {
+    try {
+      const user = await API.Auth.updateProfile({ name: $('profileName').value.trim(), bio: $('profileBio').value.trim() });
+      if ($('navAvatar')) $('navAvatar').textContent = API.Format.initials(user.name);
+      UI.Toast.success('Profile updated ✓');
+      UI.Modal.close(profileModal);
+    } catch (err) { UI.Toast.error(err.message); }
   });
-
-  // ── Emoji picker ──────────────────────────────────────────────
-  let emojiCatLoaded = {};
-
-  function buildEmojiTabs() {
-    emojiTabs.innerHTML = '';
-    UI.Emoji.categories.forEach((cat, i) => {
-      const btn = document.createElement('button');
-      btn.className = `emoji-tab${i===0?' active':''}`;
-      btn.textContent = cat.icon;
-      btn.title = cat.name;
-      btn.setAttribute('role','tab');
-      btn.setAttribute('aria-label', cat.name);
-      btn.addEventListener('click', () => {
-        emojiTabs.querySelectorAll('.emoji-tab').forEach(b=>b.classList.remove('active'));
-        btn.classList.add('active');
-        loadEmojiCategory(cat.name);
-      });
-      emojiTabs.appendChild(btn);
-    });
-    loadEmojiCategory(UI.Emoji.categories[0].name);
-  }
-
-  function loadEmojiCategory(catName) {
-    if (emojiCatLoaded[catName]) {
-      emojiGrid.dataset.cat = catName;
-      filterEmoji('');
-      return;
-    }
-    const emojis = UI.Emoji.getCategoryEmojis(catName);
-    emojiCatLoaded[catName] = emojis;
-    emojiGrid.dataset.cat = catName;
-    renderEmojiGrid(emojis);
-  }
-
-  function renderEmojiGrid(emojis) {
-    emojiGrid.innerHTML = emojis.map(e =>
-      `<button class="emoji-btn" data-emoji="${e}" title="${e}" aria-label="Insert ${e}">${e}</button>`
-    ).join('');
-    emojiGrid.querySelectorAll('.emoji-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        insertAtCursor(msgInput, btn.dataset.emoji);
-        btnSend.disabled = !msgInput.value.trim();
-        emojiPicker.classList.remove('open');
-        $('btnEmojiToggle').setAttribute('aria-expanded','false');
-        msgInput.focus();
-      });
-    });
-  }
-
-  function filterEmoji(query) {
-    const cat = emojiGrid.dataset.cat;
-    const emojis = emojiCatLoaded[cat] || [];
-    renderEmojiGrid(query ? emojis.filter(e => e.includes(query)) : emojis);
-  }
-
-  $('btnEmojiToggle').addEventListener('click', () => {
-    const isOpen = emojiPicker.classList.toggle('open');
-    $('btnEmojiToggle').setAttribute('aria-expanded', isOpen);
-    if (isOpen && !emojiTabs.children.length) buildEmojiTabs();
-  });
-
-  $('emojiSearch').addEventListener('input', UI.debounce(function() {
-    filterEmoji(this.value);
-  }, 200));
-
-  document.addEventListener('click', e => {
-    if (!e.target.closest('#emojiPicker') && !e.target.closest('#btnEmojiToggle')) {
-      emojiPicker.classList.remove('open');
-      $('btnEmojiToggle').setAttribute('aria-expanded','false');
-    }
-  });
-
-  function insertAtCursor(el, text) {
-    const s = el.selectionStart, end = el.selectionEnd;
-    el.value = el.value.slice(0, s) + text + el.value.slice(end);
-    el.selectionStart = el.selectionEnd = s + text.length;
-    el.dispatchEvent(new Event('input'));
-  }
 
   // ── Sign language panel ───────────────────────────────────────
   $('btnSignToggle').addEventListener('click', () => {
@@ -465,56 +364,37 @@
     $('btnSignToggle').setAttribute('aria-pressed', state.signPanelOpen);
     if (!state.signPanelOpen) stopSignCapture();
   });
-
-  $('btnCloseSign').addEventListener('click', () => {
-    state.signPanelOpen = false;
-    signPanel.classList.remove('open');
-    $('btnSignToggle').setAttribute('aria-pressed','false');
-    stopSignCapture();
-  });
-
+  $('btnCloseSign').addEventListener('click', () => { state.signPanelOpen = false; signPanel.classList.remove('open'); stopSignCapture(); });
   $('btnStartSign').addEventListener('click', startSignCapture);
   $('btnStopSign') .addEventListener('click', stopSignCapture);
   $('btnClearSign').addEventListener('click', clearSignWords);
 
-  $('btnSendSign').addEventListener('click', () => {
-    if (!state.signWords.length || !state.activeContact) return;
+  $('btnSendSign').addEventListener('click', async () => {
+    if (!state.signWords.length || !state.activeContactId) return;
     const content   = state.signWords.join(' ');
-    const signLabel = 'ASL Signs: ' + state.signWords.join(', ');
-    const msg = DB.Messages.send(currentUser.id, state.activeContact.id, content, 'sign');
-    msg.signLabel = signLabel;
-    appendMsgEl(msg);
-    clearSignWords();
-    renderContactList(contactSearch.value);
-    simulateReply();
+    const signLabel = 'ASL: ' + state.signWords.join(', ');
+    try {
+      const msg = await API.Messages.send(state.activeContactId, content, 'sign', signLabel);
+      appendMsgEl(msg);
+      UI.scrollToBottom(messagesArea);
+      clearSignWords();
+    } catch (err) { UI.Toast.error(err.message); }
   });
 
   async function startSignCapture() {
-    $('btnStartSign').disabled = true;
-    $('btnStopSign').disabled  = false;
+    $('btnStartSign').disabled = true; $('btnStopSign').disabled = false;
     signGestureLabel.textContent = 'Starting camera…';
-
     try {
-      state.signStream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' }
-      });
+      state.signStream = await navigator.mediaDevices.getUserMedia({ video: { width:{ideal:640}, height:{ideal:480}, facingMode:'user' } });
       signVideo.srcObject = state.signStream;
       await signVideo.play();
-
-      // Resize canvas to match video
-      signVideo.addEventListener('loadedmetadata', () => {
-        signCanvas.width  = signVideo.videoWidth;
-        signCanvas.height = signVideo.videoHeight;
-      }, { once: true });
-
+      signVideo.addEventListener('loadedmetadata', () => { signCanvas.width=signVideo.videoWidth; signCanvas.height=signVideo.videoHeight; }, { once:true });
       state.signRunning = true;
       signGestureLabel.textContent = 'Show your hand…';
-      startHandsDetection();
-      UI.Toast.success('Camera started — sign away! 🤟');
+      startSignHandsDetection();
     } catch (err) {
-      UI.Toast.error('Camera access denied: ' + err.message);
-      $('btnStartSign').disabled = false;
-      $('btnStopSign').disabled  = true;
+      UI.Toast.error('Camera denied: ' + err.message);
+      $('btnStartSign').disabled = false; $('btnStopSign').disabled = true;
       signGestureLabel.textContent = 'Camera access denied';
     }
   }
@@ -523,81 +403,39 @@
     state.signRunning = false;
     if (state.handsInstance) { try { state.handsInstance.close(); } catch {} state.handsInstance = null; }
     if (state.cameraUtil)    { try { state.cameraUtil.stop(); }     catch {} state.cameraUtil = null; }
-    if (state.signStream)    {
-      state.signStream.getTracks().forEach(t => t.stop());
-      state.signStream = null;
-    }
+    if (state.signStream)    { state.signStream.getTracks().forEach(t=>t.stop()); state.signStream = null; }
     signVideo.srcObject = null;
     const ctx = signCanvas.getContext('2d');
-    ctx && ctx.clearRect(0, 0, signCanvas.width, signCanvas.height);
+    if (ctx) ctx.clearRect(0,0,signCanvas.width,signCanvas.height);
     signGestureLabel.textContent = 'Point camera at your hand';
-    setConfidence(0);
-    $('btnStartSign').disabled = false;
-    $('btnStopSign').disabled  = true;
+    signConfFill.style.width = '0%'; signConfPct.textContent = '0%';
+    $('btnStartSign').disabled = false; $('btnStopSign').disabled = true;
   }
 
-  function startHandsDetection() {
-    if (typeof Hands === 'undefined') {
-      UI.Toast.error('MediaPipe not loaded. Check internet connection.');
-      return;
-    }
-
-    state.handsInstance = new Hands({
-      locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-    });
-
-    state.handsInstance.setOptions({
-      maxNumHands: 1,
-      modelComplexity: 1,
-      minDetectionConfidence: 0.65,
-      minTrackingConfidence: 0.5,
-    });
-
+  function startSignHandsDetection() {
+    if (typeof Hands === 'undefined') { UI.Toast.error('MediaPipe not loaded. Check internet.'); return; }
+    state.handsInstance = new Hands({ locateFile: f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+    state.handsInstance.setOptions({ maxNumHands:1, modelComplexity:1, minDetectionConfidence:0.65, minTrackingConfidence:0.5 });
     state.handsInstance.onResults(onSignResults);
-
-    state.cameraUtil = new Camera(signVideo, {
-      onFrame: async () => {
-        if (!state.signRunning) return;
-        await state.handsInstance.send({ image: signVideo });
-      },
-      width: 640,
-      height: 480,
-    });
+    state.cameraUtil = new Camera(signVideo, { onFrame: async () => { if (!state.signRunning) return; await state.handsInstance.send({ image: signVideo }); }, width:640, height:480 });
     state.cameraUtil.start();
   }
 
   function onSignResults(results) {
     const ctx = signCanvas.getContext('2d');
     GestureEngine.clearCanvas(ctx, signCanvas.width, signCanvas.height);
-
-    if (!results.multiHandLandmarks || !results.multiHandLandmarks.length) {
-      signGestureLabel.textContent = 'No hand detected — move closer';
-      setConfidence(0);
-      return;
-    }
-
-    const landmarks = results.multiHandLandmarks[0];
-    GestureEngine.drawHandOnCanvas(ctx, landmarks, signCanvas.width, signCanvas.height, true);
-
-    const result = GestureEngine.processFrame(landmarks);
+    if (!results.multiHandLandmarks?.length) { signGestureLabel.textContent = 'No hand detected'; signConfFill.style.width='0%'; signConfPct.textContent='0%'; return; }
+    const lm = results.multiHandLandmarks[0];
+    GestureEngine.drawHandOnCanvas(ctx, lm, signCanvas.width, signCanvas.height, true);
+    const result = GestureEngine.processFrame(lm);
     if (!result) return;
-
-    signGestureLabel.textContent = result.name === '…'
-      ? 'Detecting…'
-      : `✋ ${result.name}`;
-    setConfidence(result.confidence);
-
+    const pct = Math.round(result.confidence * 100);
+    signGestureLabel.textContent = result.name === '…' ? 'Detecting…' : `✋ ${result.name}`;
+    signConfFill.style.width = pct + '%'; signConfPct.textContent = pct + '%';
     if (result.emit && result.name && result.name !== '…') {
       addSignWord(result.name);
-      // TTS: speak the detected sign
-      SpeechEngine.speak(result.name, { lang: 'en-US' });
+      SpeechEngine.speak(result.name, { lang:'en-US' });
     }
-  }
-
-  function setConfidence(val) {
-    const pct = Math.round(val * 100);
-    signConfFill.style.width = pct + '%';
-    signConfPct.textContent  = pct + '%';
   }
 
   function addSignWord(word) {
@@ -617,29 +455,59 @@
       signWordQueue.innerHTML = '<span style="color:var(--color-text-3);font-size:0.82rem">Detected words appear here…</span>';
       return;
     }
-    signWordQueue.innerHTML = state.signWords.map((w, i) =>
-      `<span class="sign-word" data-idx="${i}" role="button" tabindex="0" title="Remove" aria-label="Remove ${w}">${escHtml(w)} ×</span>`
-    ).join('');
+    signWordQueue.innerHTML = state.signWords.map((w,i) =>
+      `<span class="sign-word" data-idx="${i}" role="button" tabindex="0">${escHtml(w)} ×</span>`).join('');
     signWordQueue.querySelectorAll('.sign-word').forEach(el => {
-      el.addEventListener('click', () => {
-        state.signWords.splice(+el.dataset.idx, 1);
-        renderSignQueue();
-        $('btnSendSign').disabled = state.signWords.length === 0;
-      });
+      el.addEventListener('click', () => { state.signWords.splice(+el.dataset.idx,1); renderSignQueue(); $('btnSendSign').disabled = !state.signWords.length; });
     });
   }
 
-  // ── Utility ─────────────────────────────────────────────────
-  function escHtml(str) {
-    return String(str||'')
-      .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-      .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  // ── Emoji picker ──────────────────────────────────────────────
+  let emojiLoaded = {};
+  function buildEmojiTabs() {
+    const tabs = $('emojiTabs'); tabs.innerHTML = '';
+    UI.Emoji.categories.forEach((cat,i) => {
+      const btn = document.createElement('button');
+      btn.className = `emoji-tab${i===0?' active':''}`;
+      btn.textContent = cat.icon; btn.title = cat.name;
+      btn.addEventListener('click', () => { tabs.querySelectorAll('.emoji-tab').forEach(b=>b.classList.remove('active')); btn.classList.add('active'); loadEmojiCat(cat.name); });
+      tabs.appendChild(btn);
+    });
+    loadEmojiCat(UI.Emoji.categories[0].name);
+  }
+  function loadEmojiCat(name) {
+    if (!emojiLoaded[name]) emojiLoaded[name] = UI.Emoji.getCategoryEmojis(name);
+    renderEmojiGrid(emojiLoaded[name]);
+  }
+  function renderEmojiGrid(emojis) {
+    const grid = $('emojiGrid');
+    grid.innerHTML = emojis.slice(0,80).map(e=>`<button class="emoji-btn" aria-label="${e}">${e}</button>`).join('');
+    grid.querySelectorAll('.emoji-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const s=msgInput.selectionStart, end=msgInput.selectionEnd;
+        msgInput.value = msgInput.value.slice(0,s) + btn.textContent + msgInput.value.slice(end);
+        msgInput.selectionStart = msgInput.selectionEnd = s + btn.textContent.length;
+        btnSend.disabled = !msgInput.value.trim();
+        emojiPicker.classList.remove('open');
+        msgInput.focus();
+      });
+    });
+  }
+  $('btnEmojiToggle').addEventListener('click', () => {
+    const open = emojiPicker.classList.toggle('open');
+    $('btnEmojiToggle').setAttribute('aria-expanded', open);
+    if (open && !$('emojiTabs').children.length) buildEmojiTabs();
+  });
+  document.addEventListener('click', e => {
+    if (!e.target.closest('#emojiPicker') && !e.target.closest('#btnEmojiToggle')) emojiPicker.classList.remove('open');
+  });
+  $('btnAttach').addEventListener('click', () => UI.Toast.info('File sharing coming soon 📎'));
+
+  function escHtml(s) {
+    return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
-  // Auto-refresh contact list every 30s
-  setInterval(() => renderContactList(contactSearch.value), 30000);
-
-  // Mark offline on close
-  window.addEventListener('beforeunload', () => DB.Presence.setOffline(currentUser.id));
+  // Auto-refresh contacts every 30s
+  setInterval(refreshContactList, 30000);
 
 })();
