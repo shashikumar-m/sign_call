@@ -213,10 +213,11 @@ app.get('/health', (req, res) => res.json({
 // ── Start server ────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n✋ SignConnect server running`);
-  console.log(`   URL  : http://0.0.0.0:${PORT}`);
-  console.log(`   Health: http://0.0.0.0:${PORT}/health`);
-  console.log(`   Mode : ${process.env.NODE_ENV || 'development'}\n`);
+  console.log(`\n✋ sign_call server running`);
+  console.log(`   URL    : http://0.0.0.0:${PORT}`);
+  console.log(`   Health : http://0.0.0.0:${PORT}/health`);
+  console.log(`   Static : ${FRONTEND_DIR}`);
+  console.log(`   Mode   : ${process.env.NODE_ENV || 'development'}\n`);
 });
 
 // Graceful shutdown
