@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SignConnect — Video Call</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="css/main.css"/>
+  <link rel="stylesheet" href="css/call.css"/>
+</head>
+<body>
+<div class="call-page" id="callPage">
+
+  <!-- Remote video full-screen -->
+  <div class="remote-video-wrap">
+    <video id="remoteVideo" autoplay playsinline aria-label="Remote participant video"></video>
+    <div class="remote-placeholder" id="remotePlaceholder">
+      <div class="avatar avatar-xl" id="remotePlaceholderAvatar" style="background:var(--color-primary);width:100px;height:100px;font-size:2.5rem">?</div>
+      <div class="remote-placeholder-name" id="remotePlaceholderName">Connecting…</div>
+      <div class="remote-placeholder-status">Waiting for connection</div>
+      <div class="remote-placeholder-dots">
+        <span></span><span></span><span></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sign caption area (appears over remote video) -->
+  <div class="sign-caption-area" id="signCaptionArea" aria-live="assertive" aria-label="Sign language captions"></div>
+
+  <!-- Speech caption bar -->
+  <div class="caption-bar" id="captionBar" aria-live="polite" aria-label="Speech captions">
+    <span id="captionInterim" class="caption-interim"></span>
+    <span id="captionFinal"   class="caption-final"></span>
+  </div>
+
+  <!-- Top contact bar -->
+  <div class="call-topbar controls-autohide" id="callTopbar" aria-label="Call information">
+    <div class="contact-avatar-wrap">
+      <div class="avatar avatar-md" id="callContactAvatar" style="background:var(--color-primary)">?</div>
+    </div>
+    <div class="call-contact-info">
+      <div class="call-contact-name" id="callContactName">Loading…</div>
+      <div class="call-contact-status">
+        <span class="status-dot status-online" aria-hidden="true"></span>
+        <span id="callContactStatus">Connected</span>
+      </div>
+    </div>
+    <div class="call-duration" id="callDuration" aria-label="Call duration" aria-live="off">00:00</div>
+    <div class="quality-indicator" id="qualityIndicator" aria-label="Connection quality" title="Connection quality">
+      <div class="quality-bar active"></div>
+      <div class="quality-bar active"></div>
+      <div class="quality-bar active"></div>
+      <div class="quality-bar"></div>
+    </div>
+    <button class="btn btn-ghost btn-sm" id="btnBackToChat" aria-label="Back to chat">← Chat</button>
+  </div>
+
+  <!-- Local video PiP -->
+  <div class="local-video-wrap" id="localVideoWrap" aria-label="Your video">
+    <video id="localVideo" autoplay playsinline muted aria-label="Your camera"></video>
+    <canvas id="localCanvas" aria-hidden="true"></canvas>
+    <div class="local-video-overlay">
+      <div class="local-video-name" id="localVideoName">You</div>
+      <div class="local-sign-label" id="localSignLabel" aria-live="polite"></div>
+      <div class="call-confidence" id="callConfidence" aria-label="Detection confidence">
+        <div class="confidence-bar" style="width:50px">
+          <div class="confidence-fill" id="callConfFill" style="width:0%"></div>
+        </div>
+        <span id="callConfPct">0%</span>
+      </div>
+    </div>
+    <div class="pip-resize" id="pipResize" title="Resize" aria-hidden="true"></div>
+  </div>
+
+  <!-- Controls bar -->
+  <div class="controls-bar controls-autohide" id="controlsBar" aria-label="Call controls">
+    <button class="ctrl-btn" id="ctrlMic"   aria-label="Toggle microphone" aria-pressed="true"  title="Mic">🎙️<span class="ctrl-label">Mic</span></button>
+    <button class="ctrl-btn" id="ctrlCam"   aria-label="Toggle camera"     aria-pressed="true"  title="Camera">📷<span class="ctrl-label">Camera</span></button>
+    <div class="ctrl-separator" aria-hidden="true"></div>
+    <button class="ctrl-btn" id="ctrlSign"  aria-label="Toggle sign detection" aria-pressed="true" title="Sign Detect" class="active">🤟<span class="ctrl-label">Signs</span></button>
+    <button class="ctrl-btn" id="ctrlCC"    aria-label="Toggle captions"   aria-pressed="true"  title="Captions">CC<span class="ctrl-label">Captions</span></button>
+    <button class="ctrl-btn" id="ctrlSpeech" aria-label="Toggle speech recognition" aria-pressed="false" title="Speech">🎤<span class="ctrl-label">Speech</span></button>
+    <div class="ctrl-separator" aria-hidden="true"></div>
+    <button class="ctrl-btn" id="ctrlHistory" aria-label="Caption history"  title="History">📋<span class="ctrl-label">History</span></button>
+    <button class="ctrl-btn" id="ctrlScreen" aria-label="Share screen"      title="Screen Share">🖥️<span class="ctrl-label">Share</span></button>
+    <div class="ctrl-separator" aria-hidden="true"></div>
+    <button class="ctrl-btn end-call" id="ctrlEnd" aria-label="End call" title="End Call">📵<span class="ctrl-label">End</span></button>
+  </div>
+
+  <!-- Caption history panel -->
+  <aside class="caption-history" id="captionHistory" aria-label="Caption history">
+    <div class="caption-history-header">
+      <span class="caption-history-title">Caption History</span>
+      <button class="caption-history-close" id="captionHistoryClose" aria-label="Close history">✕</button>
+    </div>
+    <div class="caption-list" id="captionList" role="log" aria-live="polite" aria-label="Captions log"></div>
+  </aside>
+
+  <!-- Screen share badge -->
+  <div class="screenshare-badge" id="screenshareBadge" aria-live="polite">📺 You are sharing your screen</div>
+
+  <!-- Reconnecting overlay -->
+  <div class="reconnect-overlay" id="reconnectOverlay" aria-live="assertive">
+    <div class="reconnect-spinner" aria-hidden="true"></div>
+    <p>Reconnecting…</p>
+  </div>
+</div>
+
+<div id="toast-container" role="alert" aria-live="polite"></div>
+
+<!-- Socket.io client — loaded from our own server at runtime -->
+<script src="/socket.io/socket.io.js"></script>
+
+<!-- MediaPipe Hands from CDN -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+<script src="js/db.js"></script>
+<script src="js/auth.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/mediapipe.js"></script>
+<script src="js/speech.js"></script>
+<script src="js/call.js"></script>
+</body>
+</html>

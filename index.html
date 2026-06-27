@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SignConnect — Communication for Everyone</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="css/main.css"/>
+  <link rel="stylesheet" href="css/landing.css"/>
+</head>
+<body>
+
+<!-- ── Navbar ───────────────────────────────────────────────── -->
+<nav class="nav" id="mainNav" aria-label="Main navigation">
+  <div class="container nav-inner">
+    <a href="index.html" class="nav-logo" aria-label="SignConnect Home">
+      <div class="nav-logo-icon" aria-hidden="true">✋</div>
+      <span>SignConnect</span>
+    </a>
+    <div class="nav-links" id="navLinks">
+      <a href="#features"   class="nav-link">Features</a>
+      <a href="#how-it-works" class="nav-link">How It Works</a>
+      <a href="#community"  class="nav-link">Community</a>
+    </div>
+    <div class="nav-actions">
+      <button class="btn btn-ghost btn-sm" id="btnOpenLogin"  aria-label="Sign in">Sign In</button>
+      <button class="btn btn-primary btn-sm" id="btnOpenSignup" aria-label="Create account">Get Started</button>
+    </div>
+    <button class="mobile-menu-btn" id="mobileMenuBtn" aria-label="Toggle menu" aria-expanded="false">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+</nav>
+
+<!-- ── Hero ─────────────────────────────────────────────────── -->
+<section class="hero" aria-labelledby="heroTitle">
+  <div class="hero-bg" aria-hidden="true">
+    <div class="hero-bg-gradient"></div>
+    <div class="hero-grid"></div>
+  </div>
+  <div class="container hero-content">
+    <div class="hero-text">
+      <div class="hero-badge" role="note">
+        <span>🌍</span>
+        <span>Breaking Communication Barriers Worldwide</span>
+      </div>
+      <h1 class="hero-title" id="heroTitle">
+        Communicate Without <span class="gradient-text">Limits</span>
+      </h1>
+      <p class="hero-subtitle">
+        Real-time sign language recognition converts hand gestures to text and captions —
+        so deaf, mute, and hearing people can connect naturally, in any conversation.
+      </p>
+      <div class="hero-actions">
+        <button class="btn btn-primary btn-xl" id="btnHeroStart">Start for Free</button>
+        <button class="btn btn-ghost btn-xl" onclick="document.getElementById('how-it-works').scrollIntoView({behavior:'smooth'})">
+          See How It Works ↓
+        </button>
+      </div>
+      <div class="hero-stats" role="list">
+        <div class="stat-item" role="listitem">
+          <div class="stat-value">Real-Time</div>
+          <div class="stat-label">Sign Detection</div>
+        </div>
+        <div class="stat-item" role="listitem">
+          <div class="stat-value">25+</div>
+          <div class="stat-label">Gestures Recognized</div>
+        </div>
+        <div class="stat-item" role="listitem">
+          <div class="stat-value">A–Z</div>
+          <div class="stat-label">Fingerspelling</div>
+        </div>
+        <div class="stat-item" role="listitem">
+          <div class="stat-value">Live</div>
+          <div class="stat-label">Speech Captions</div>
+        </div>
+      </div>
+    </div>
+    <div class="hero-demo" aria-hidden="true">
+      <div class="demo-card">
+        <div class="demo-card-header">
+          <div class="demo-dots">
+            <div class="demo-dot"></div>
+            <div class="demo-dot"></div>
+            <div class="demo-dot"></div>
+          </div>
+          <span class="demo-title">SignConnect · Live Call</span>
+        </div>
+        <div class="demo-body">
+          <div class="demo-messages" id="demoMessages">
+            <div class="demo-msg recv">
+              <div class="demo-bubble">Hey! How are you? 👋</div>
+            </div>
+            <div class="demo-msg sign">
+              <div class="demo-bubble">
+                ✋ <strong>I Love You</strong>
+                <span class="demo-sign-label">ASL gesture detected · 94% confidence</span>
+              </div>
+            </div>
+            <div class="demo-msg sent">
+              <div class="demo-bubble">I love you too! 😊</div>
+            </div>
+          </div>
+          <div id="demoTypingRow" class="demo-msg recv" style="margin-top:8px">
+            <div class="demo-typing">
+              <span></span><span></span><span></span>
+            </div>
+          </div>
+          <div class="demo-input-bar">
+            <span>✋</span>
+            <input type="text" id="demoInput" placeholder="Type or sign a message…" readonly/>
+            <button class="btn btn-primary btn-sm" style="pointer-events:none">Send</button>
+          </div>
+        </div>
+      </div>
+      <div class="float-badge left">
+        <span>🤟</span>
+        <span>Sign Detected: <strong>Hello</strong></span>
+      </div>
+      <div class="float-badge right">
+        <span>📝</span>
+        <span>Caption: <strong id="floatCaption" class="typing-cursor"></strong></span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Features ──────────────────────────────────────────────── -->
+<section class="section" id="features" aria-labelledby="featuresTitle">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-label">Capabilities</span>
+      <h2 class="section-title" id="featuresTitle">Everything You Need to Connect</h2>
+      <p class="section-desc">Built from the ground up for the deaf and mute community — and everyone who wants to communicate with them.</p>
+    </div>
+    <div class="features-grid" role="list">
+      <div class="feature-card" role="listitem">
+        <div class="feature-icon" aria-hidden="true">🤟</div>
+        <h3 class="feature-title">Sign → Text (Real AI)</h3>
+        <p class="feature-desc">MediaPipe Hands tracks 21 landmarks per hand. Our gesture engine classifies signs using actual finger angles and landmark geometry — not random guessing.</p>
+      </div>
+      <div class="feature-card" role="listitem">
+        <div class="feature-icon" aria-hidden="true">📝</div>
+        <h3 class="feature-title">Live Captions</h3>
+        <p class="feature-desc">Detected signs and spoken words appear as animated captions on the other person's screen in real time — no interpreter needed.</p>
+      </div>
+      <div class="feature-card" role="listitem">
+        <div class="feature-icon" aria-hidden="true">🎙️</div>
+        <h3 class="feature-title">Speech → Captions</h3>
+        <p class="feature-desc">Hearing users speak naturally. The Web Speech API transcribes every word as a live caption stream so deaf users can follow every sentence.</p>
+      </div>
+      <div class="feature-card" role="listitem">
+        <div class="feature-icon" aria-hidden="true">🔊</div>
+        <h3 class="feature-title">Sign → Voice</h3>
+        <p class="feature-desc">Detected signs are read aloud via text-to-speech synthesis, letting mute users have their gestures voiced for hearing participants.</p>
+      </div>
+      <div class="feature-card" role="listitem">
+        <div class="feature-icon" aria-hidden="true">📹</div>
+        <h3 class="feature-title">Pro Video Call UI</h3>
+        <p class="feature-desc">Full-screen remote video, draggable PiP local view, hand skeleton overlay, caption history panel, and one-click controls — all in one.</p>
+      </div>
+      <div class="feature-card" role="listitem">
+        <div class="feature-icon" aria-hidden="true">💬</div>
+        <h3 class="feature-title">Persistent Chat</h3>
+        <p class="feature-desc">All messages — text, sign, and voice — are stored locally and synced. Sign messages show their ASL label and auto-generate captions.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── How it works ──────────────────────────────────────────── -->
+<section class="section how-section" id="how-it-works" aria-labelledby="howTitle">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-label">Process</span>
+      <h2 class="section-title" id="howTitle">How It Works</h2>
+      <p class="section-desc">From gesture to caption in under 100ms — here's the pipeline.</p>
+    </div>
+    <div class="steps-grid" role="list">
+      <div class="step-card" role="listitem">
+        <div class="step-number" aria-hidden="true">1</div>
+        <h3 class="step-title">Camera Captures</h3>
+        <p class="step-desc">Your webcam streams video to MediaPipe Hands, which finds your hands in every frame.</p>
+      </div>
+      <div class="step-card" role="listitem">
+        <div class="step-number" aria-hidden="true">2</div>
+        <h3 class="step-title">Landmarks Extracted</h3>
+        <p class="step-desc">21 3D points per hand are tracked — fingertips, knuckles, wrist — 60 times per second.</p>
+      </div>
+      <div class="step-card" role="listitem">
+        <div class="step-number" aria-hidden="true">3</div>
+        <h3 class="step-title">Gesture Classified</h3>
+        <p class="step-desc">Our engine calculates finger extension angles and landmark ratios to match your gesture with confidence scoring.</p>
+      </div>
+      <div class="step-card" role="listitem">
+        <div class="step-number" aria-hidden="true">4</div>
+        <h3 class="step-title">Caption Delivered</h3>
+        <p class="step-desc">The recognized word appears as a live caption on the remote side — instantly, automatically, no interpreter needed.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── CTA ───────────────────────────────────────────────────── -->
+<section class="cta-section" id="community" aria-labelledby="ctaTitle">
+  <div class="container">
+    <div class="cta-box">
+      <h2 class="cta-title" id="ctaTitle">Ready to Connect Without Barriers?</h2>
+      <p class="cta-desc">Create your free account and start a conversation that everyone can understand.</p>
+      <div class="cta-actions">
+        <button class="btn btn-primary btn-xl" id="btnCtaStart">Create Free Account</button>
+        <button class="btn btn-secondary btn-xl" id="btnCtaLogin">Sign In</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Footer ────────────────────────────────────────────────── -->
+<footer class="footer" role="contentinfo">
+  <div class="container">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <div class="nav-logo" style="margin-bottom:12px">
+          <div class="nav-logo-icon" aria-hidden="true">✋</div>
+          <span style="font-size:1.1rem;font-weight:700">SignConnect</span>
+        </div>
+        <p class="footer-desc">A communication platform built with love for the deaf and mute community. Sign language is a language — we make it universal.</p>
+      </div>
+      <div>
+        <div class="footer-heading">Product</div>
+        <div class="footer-links">
+          <a href="#features" class="footer-link">Features</a>
+          <a href="#how-it-works" class="footer-link">How It Works</a>
+          <a href="#" class="footer-link">Roadmap</a>
+        </div>
+      </div>
+      <div>
+        <div class="footer-heading">Support</div>
+        <div class="footer-links">
+          <a href="#" class="footer-link">Documentation</a>
+          <a href="#" class="footer-link">Accessibility</a>
+          <a href="#" class="footer-link">Contact</a>
+        </div>
+      </div>
+      <div>
+        <div class="footer-heading">Legal</div>
+        <div class="footer-links">
+          <a href="#" class="footer-link">Privacy Policy</a>
+          <a href="#" class="footer-link">Terms of Service</a>
+        </div>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span class="footer-copy">© 2026 SignConnect. Built for everyone.</span>
+      <div class="footer-socials" aria-label="Social links">
+        <a href="#" class="social-btn" aria-label="GitHub">⚙</a>
+        <a href="#" class="social-btn" aria-label="Twitter">𝕏</a>
+        <a href="#" class="social-btn" aria-label="LinkedIn">in</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<!-- ── Auth Modal ─────────────────────────────────────────────── -->
+<div class="modal-backdrop hidden" id="authModal" role="dialog" aria-modal="true" aria-labelledby="authModalTitle">
+  <div class="modal" style="max-width:460px">
+    <div class="modal-header">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div class="nav-logo-icon" style="width:32px;height:32px;font-size:1rem" aria-hidden="true">✋</div>
+        <span class="modal-title" id="authModalTitle">Welcome to SignConnect</span>
+      </div>
+      <button class="modal-close" id="authModalClose" aria-label="Close">&times;</button>
+    </div>
+    <div class="auth-tabs" role="tablist">
+      <button class="auth-tab active" role="tab" aria-selected="true"  data-tab="login"  id="tabLogin">Sign In</button>
+      <button class="auth-tab"        role="tab" aria-selected="false" data-tab="signup" id="tabSignup">Create Account</button>
+    </div>
+
+    <!-- Login form -->
+    <form class="auth-form-panel active" id="loginPanel" aria-labelledby="tabLogin" novalidate>
+      <div class="form-group">
+        <label class="form-label" for="loginEmail">Email</label>
+        <input class="form-input" type="email" id="loginEmail" name="email" placeholder="you@example.com" autocomplete="email" required/>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="loginPassword">Password</label>
+        <input class="form-input" type="password" id="loginPassword" name="password" placeholder="Your password" autocomplete="current-password" required/>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:0.8rem;color:var(--color-text-2);cursor:pointer">
+        <input type="checkbox" id="loginRemember" name="remember"/> Remember me
+      </label>
+      <button type="submit" class="btn btn-primary w-full btn-lg" id="loginSubmit">Sign In</button>
+      <p class="auth-footer-text">Don't have an account? <a href="#" data-tab="signup">Create one free</a></p>
+    </form>
+
+    <!-- Signup form -->
+    <form class="auth-form-panel" id="signupPanel" aria-labelledby="tabSignup" novalidate>
+      <div class="form-group">
+        <label class="form-label" for="signupName">Full Name</label>
+        <input class="form-input" type="text" id="signupName" name="name" placeholder="Your name" autocomplete="name" required/>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div class="form-group">
+          <label class="form-label" for="signupEmail">Email</label>
+          <input class="form-input" type="email" id="signupEmail" name="email" placeholder="you@example.com" autocomplete="email" required/>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="signupUsername">Username</label>
+          <input class="form-input" type="text" id="signupUsername" name="username" placeholder="yourname" autocomplete="username"/>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div class="form-group">
+          <label class="form-label" for="signupPassword">Password</label>
+          <input class="form-input" type="password" id="signupPassword" name="password" placeholder="Min 6 chars" autocomplete="new-password" required/>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="signupConfirm">Confirm</label>
+          <input class="form-input" type="password" id="signupConfirm" name="confirmPassword" placeholder="Repeat password" autocomplete="new-password" required/>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">I am</label>
+        <div class="user-type-grid" role="radiogroup" aria-label="User type">
+          <label class="user-type-option selected" data-value="deaf">
+            <input type="radio" name="userType" value="deaf" checked/>
+            <span class="user-type-emoji">🦻</span>Deaf
+          </label>
+          <label class="user-type-option" data-value="mute">
+            <input type="radio" name="userType" value="mute"/>
+            <span class="user-type-emoji">🤐</span>Mute
+          </label>
+          <label class="user-type-option" data-value="deafmute">
+            <input type="radio" name="userType" value="deafmute"/>
+            <span class="user-type-emoji">🤟</span>Deaf & Mute
+          </label>
+          <label class="user-type-option" data-value="hearing">
+            <input type="radio" name="userType" value="hearing"/>
+            <span class="user-type-emoji">👂</span>Hearing
+          </label>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary w-full btn-lg" id="signupSubmit">Create Account</button>
+      <p class="auth-footer-text">Already have an account? <a href="#" data-tab="login">Sign in</a></p>
+    </form>
+  </div>
+</div>
+
+<div id="toast-container" role="alert" aria-live="polite"></div>
+
+<script src="js/db.js"></script>
+<script src="js/auth.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/landing.js"></script>
+</body>
+</html>
